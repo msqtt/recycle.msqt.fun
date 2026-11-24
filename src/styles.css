@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-paper text-ink;
+  font-family: 'Space Grotesk', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+}
+
+::selection {
+  @apply bg-lemon;
+}
+
+/* WTOP 固定 iframe 层由 hostClient 动态创建（#wtop-layer），永远不在 React 树内 */

@@ -1,0 +1,40 @@
+{
+  "name": "recycle.msqt.fun",
+  "private": true,
+  "version": "1.0.0",
+  "description": "可回收 · WTOP 编排站（纯前端 SPA，neobrutalism UI）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173 --strictPort",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview --port 5173 --strictPort",
+    "test": "vitest run",
+    "sync-sdk": "bash scripts/sync-sdk.sh"
+  },
+  "dependencies": {
+    "@wtop/core": "file:./vendor/wtop/core",
+    "@wtop/host": "file:./vendor/wtop/host",
+    "@wtop/types": "file:./vendor/wtop/types",
+    "@xyflow/react": "^12.3.6",
+    "ajv": "^8.17.1",
+    "dexie": "^4.0.10",
+    "dexie-react-hooks": "^1.1.7",
+    "jsonata": "^2.0.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.9"
+  }
+}

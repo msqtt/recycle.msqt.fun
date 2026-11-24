@@ -1,0 +1,21 @@
+{
+  "name": "@wtop/host",
+  "version": "1.0.0",
+  "description": "WTOP 编排站 SDK：iframe 层/RPC/超时/可见性/池化/注册中心",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@wtop/core": "file:../core",
+    "@wtop/types": "file:../types"
+  }
+}
