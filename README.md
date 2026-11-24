@@ -75,6 +75,7 @@ Referrer-Policy: no-referrer
 ### 线上部署（已配置）
 
 - GitHub：`msqtt/recycle.msqt.fun`（public，Netlify 免部署密钥克隆）
-- Netlify 站点：`recycle-msqt-fun`（id `0c9d9fe0-2168-4ef0-8357-8c80a319c4b1`），构建走 `netlify.toml`
-- 域名：Cloudflare CNAME `recycle` → `recycle-msqt-fun.netlify.app`（仅 DNS，不代理，TLS 由 Netlify 签发）
+- Netlify 站点：`recycle-msqt`（id `4934dfea-4b32-4303-b1ad-331cb3262846`）
+- 域名：Cloudflare CNAME `recycle` → `recycle-msqt.netlify.app`（仅 DNS，不代理，TLS 由 Netlify 签发）
+- 自动构建：GitHub Actions（`.github/workflows/deploy.yml`）push main → pnpm build → `scripts/netlify-deploy.mjs` 经 Netlify API 直传发布（账号未装 Netlify GitHub App，原生 git 联动不可用，故走 Actions）
 - 线上地址：https://recycle.msqt.fun
