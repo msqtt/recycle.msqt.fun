@@ -64,7 +64,7 @@ vendor/wtop/          SDK 构建产物（file: 依赖，scripts/sync-sdk.sh 同�
 静态托管 + SPA fallback。响应头建议（详见设计文档 Host §21）：
 
 ```
-Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval';
+Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline';
   frame-src https:; connect-src https:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'
 Referrer-Policy: no-referrer
 ```
