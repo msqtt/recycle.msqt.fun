@@ -72,3 +72,9 @@ Referrer-Policy: no-referrer
 注：`'unsafe-eval'` 为 ajv 运行时编译 JSON Schema 所需（个人单用户站，权衡后接受）。
 
 工具站需允许被本站 iframe 嵌入（`frame-ancestors https://recycle.msqt.fun`）并对 manifest 开 CORS。
+### 线上部署（已配置）
+
+- GitHub：`msqtt/recycle.msqt.fun`（public，Netlify 免部署密钥克隆）
+- Netlify 站点：`recycle-msqt-fun`（id `0c9d9fe0-2168-4ef0-8357-8c80a319c4b1`），构建走 `netlify.toml`
+- 域名：Cloudflare CNAME `recycle` → `recycle-msqt-fun.netlify.app`（仅 DNS，不代理，TLS 由 Netlify 签发）
+- 线上地址：https://recycle.msqt.fun
