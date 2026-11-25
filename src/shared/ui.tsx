@@ -50,7 +50,7 @@ export function NeoSelect({ className, children, ...props }: SelectHTMLAttribute
 
 const badgeColors: Record<string, string> = {
   ok: 'bg-lime', succeeded: 'bg-lime', running: 'bg-sky', 'waiting-human': 'bg-tang',
-  'paused-human': 'bg-tang', failed: 'bg-punch', cancelled: 'bg-grape', skipped: 'bg-gray-200',
+  'paused-human': 'bg-tang', 'paused-step': 'bg-lemon', failed: 'bg-punch', cancelled: 'bg-grape', skipped: 'bg-gray-200',
   pending: 'bg-gray-100', ready: 'bg-sky', degraded: 'bg-tang', unreachable: 'bg-punch',
   unknown: 'bg-gray-100', preserving: 'bg-punch', loading: 'bg-gray-100', handshaking: 'bg-gray-100',
   wtop: 'bg-sky', http: 'bg-grape',

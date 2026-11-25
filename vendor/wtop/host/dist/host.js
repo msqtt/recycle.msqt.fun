@@ -121,7 +121,7 @@ export function createHost(options) {
         clearTimers(rec);
         setState(rec, 'succeeded');
         rec.resolve(data);
-        const reusable = rec.methodDef?.mode === 'headless' && rec.methodDef?.stateless === true;
+        const reusable = (rec.modeOverride ?? rec.methodDef?.mode) === 'headless' && rec.methodDef?.stateless === true;
         if (reusable && rec.instance && rec.sessionId) {
             poolInstance(rec);
         }
@@ -360,7 +360,7 @@ export function createHost(options) {
         rec.methodDef = entry?.manifest.methods.find((m) => m.name === rec.method) ?? null;
         rec.execRemaining = rec.timeoutMs ?? rec.methodDef?.timeoutMs ?? defaultTimeoutMs;
         const pooled = pool.get(key);
-        const reusable = rec.methodDef?.mode === 'headless' && rec.methodDef?.stateless === true;
+        const reusable = (rec.modeOverride ?? rec.methodDef?.mode) === 'headless' && rec.methodDef?.stateless === true;
         if (pooled && reusable) {
             pool.delete(key);
             if (pooled.heartbeatTimer)
@@ -425,6 +425,7 @@ export function createHost(options) {
                 params: opts.params, timeoutMs: opts.timeoutMs, attempt: opts.attempt ?? 0,
                 allowSameOrigin: opts.allowSameOrigin, viewport: opts.viewport,
                 preserveScene: opts.preserveScene ?? true,
+                modeOverride: opts.modeOverride,
                 state: 'loading', instance: null, unsubTransport: null,
                 sessionId: null, negotiated: PROTOCOL_VERSION, methodDef: null,
                 resolve, reject, result,

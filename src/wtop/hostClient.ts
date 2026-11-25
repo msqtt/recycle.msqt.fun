@@ -16,8 +16,13 @@ function layerRoot(): HTMLElement {
   return el;
 }
 
-export async function getHost(): Promise<Host> {
-  const tools = await db.tools.where('type').equals('wtop').toArray();
+export async function getHost(extraTools: ToolRecord[] = []): Promise<Host> {
+  const registered = await db.tools.where('type').equals('wtop').toArray();
+  // bundle 临时工具：不写库，仅并入白名单与注册表
+  const tools = [
+    ...registered,
+    ...extraTools.filter((t) => t.type === 'wtop' && !registered.some((x) => x.url === t.url)),
+  ];
   const origins = [...new Set(tools.map((t) => new URL(t.url).origin))].sort();
   const key = origins.join('|');
   if (host && key === originsKey) return host;

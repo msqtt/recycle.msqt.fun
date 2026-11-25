@@ -2,7 +2,8 @@ import type { JSONSchema, MethodMode } from '@wtop/types';
 
 export type NodeType =
   | 'start' | 'end' | 'call-wtop' | 'call-http' | 'transform' | 'condition'
-  | 'switch' | 'loop' | 'parallel' | 'merge' | 'approval' | 'subflow';
+  | 'switch' | 'loop' | 'parallel' | 'merge' | 'approval' | 'subflow'
+  | 'const' | 'input' | 'output';
 
 export interface RetryDef { max: number; on?: string[]; backoffMs?: number }
 
@@ -38,6 +39,13 @@ export interface FlowNode {
   prompt?: string;
   // subflow
   flowId?: string;
+  // const / output
+  value?: unknown;
+  // output
+  title?: string;
+  format?: 'auto' | 'json' | 'text' | 'table';
+  filename?: string;
+  mime?: string;
   // 画布坐标（不参与执行）
   x?: number;
   y?: number;
@@ -93,7 +101,7 @@ export const DSL_SCHEMA: JSONSchema = {
         id: { type: 'string', pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$' },
         type: {
           enum: ['start', 'end', 'call-wtop', 'call-http', 'transform', 'condition',
-            'switch', 'loop', 'parallel', 'merge', 'approval', 'subflow'],
+            'switch', 'loop', 'parallel', 'merge', 'approval', 'subflow', 'const', 'input', 'output'],
         },
         onError: { enum: ['fail', 'skip', 'fallback'], default: 'fail' },
         retry: { $ref: '#/$defs/retry' },
@@ -110,6 +118,9 @@ export const DSL_SCHEMA: JSONSchema = {
         { if: { properties: { type: { const: 'merge' } } }, then: { properties: { strategy: { enum: ['array', 'object', 'first'], default: 'array' } } } },
         { if: { properties: { type: { const: 'approval' } } }, then: { required: ['prompt'], properties: { prompt: { type: 'string' } } } },
         { if: { properties: { type: { const: 'subflow' } } }, then: { required: ['flowId', 'inputMapping'], properties: { flowId: { type: 'string' }, inputMapping: { $ref: '#/$defs/mapping' } } } },
+        { if: { properties: { type: { const: 'const' } } }, then: { required: ['value'], properties: { value: { $ref: '#/$defs/binding' } } } },
+        { if: { properties: { type: { const: 'input' } } }, then: { required: ['inputSchema'], properties: { inputSchema: { type: 'object' }, prompt: { type: 'string' } } } },
+        { if: { properties: { type: { const: 'output' } } }, then: { required: ['value'], properties: { value: { $ref: '#/$defs/binding' }, title: { type: 'string' }, format: { enum: ['auto', 'json', 'text', 'table'] }, filename: { type: 'string' }, mime: { type: 'string' } } } },
       ],
     },
   },

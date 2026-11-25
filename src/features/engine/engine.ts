@@ -1,7 +1,7 @@
 import { WtopError, type Progress, type WaitingHumanInfo } from '@wtop/types';
 import { validateData } from '@wtop/core';
 import type { DSL, FlowNode, FlowEdge } from './dsl';
-import { evalExpression, evalMapping, type RunContext } from './expr';
+import { evalExpression, evalMapping, evalBinding, type RunContext } from './expr';
 import { callHttp, EngineError } from './http';
 import type { ToolRecord, NodeState, RunStatus } from '../../db/types';
 
@@ -15,6 +15,7 @@ export interface HostLike {
   execute(opts: {
     toolUrl: string; method: string; params: unknown;
     timeoutMs?: number; attempt?: number; preserveScene?: boolean; allowSameOrigin?: boolean;
+    modeOverride?: 'headless' | 'hybrid' | 'interactive';
     onProgress?: (p: Progress) => void;
     onWaitingHuman?: (info: WaitingHumanInfo) => void;
   }): CallLike;
@@ -25,6 +26,10 @@ export type EngineEvent =
   | { type: 'node:state'; runId: string; nodeId: string; state: NodeState }
   | { type: 'node:progress'; runId: string; nodeId: string; percent?: number; text?: string }
   | { type: 'node:waiting-human'; runId: string; nodeId: string; reason?: string; blocking: boolean }
+  | { type: 'node:input-required'; runId: string; nodeId: string; schema?: unknown; prompt?: string }
+  | { type: 'node:paused'; runId: string; nodeId: string }
+  | { type: 'node:input'; runId: string; nodeId: string; params: unknown }
+  | { type: 'node:output'; runId: string; nodeId: string; output: unknown }
   | { type: 'node:log'; runId: string; nodeId?: string; level: 'debug' | 'info' | 'warn' | 'error'; message: string }
   | { type: 'run:finished'; runId: string; status: RunStatus; output?: unknown; error?: { nodeId: string; code: string; message: string } };
 
@@ -51,7 +56,19 @@ export interface RunHandle {
   id: string;
   cancel(): void;
   resolveApproval(nodeId: string, approved: boolean): void;
+  resolveInput(nodeId: string, value: unknown): void;
+  step(): void;
+  resume(): void;
+  pause(): void;
+  setBreakpoints(ids: string[]): void;
   done: Promise<RunResult>;
+}
+
+export interface RunOptions {
+  mode?: 'run' | 'step';
+  breakpoints?: string[];
+  runtimeInputs?: Record<string, unknown>;
+  headless?: boolean;
 }
 
 const errCode = (e: unknown): string =>
@@ -60,14 +77,39 @@ const errMsg = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHandle {
+export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps, opts?: RunOptions): RunHandle {
   const runId = crypto.randomUUID();
   const controller = new AbortController();
   const approvals = new Map<string, (approved: boolean) => void>();
+  const inputResolvers = new Map<string, (value: unknown) => void>();
   const activeWtop = new Map<string, CallLike>();
   const nodeStates: Record<string, NodeState> = {};
   let waitingCount = 0;
   let cancelled = false;
+
+  // ---- 试运行调度门（v2 §5）----
+  let mode: 'run' | 'step' = opts?.mode ?? 'run';
+  const breakpoints = new Set(opts?.breakpoints ?? []);
+  const paused: { nid: string; resolve: () => void }[] = [];
+  const syncRunStatus = () => {
+    if (cancelled) return;
+    if (waitingCount > 0) setRunStatus('paused-human');
+    else if (paused.length > 0) setRunStatus('paused-step');
+    else setRunStatus('running');
+  };
+  const gate = async (node: FlowNode, prefix: string): Promise<void> => {
+    if (prefix || cancelled) return;
+    if (mode !== 'step' && !breakpoints.has(node.id)) return;
+    await new Promise<void>((resolve) => {
+      paused.push({ nid: node.id, resolve });
+      emit({ type: 'node:paused', runId, nodeId: node.id });
+      syncRunStatus();
+    });
+  };
+  const releasePaused = (count: number) => {
+    for (const p of paused.splice(0, count)) p.resolve();
+    syncRunStatus();
+  };
 
   const emit = deps.emit;
   const log = (level: 'debug' | 'info' | 'warn' | 'error', message: string, nodeId?: string) =>
@@ -86,11 +128,11 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHan
     waitingCount++;
     setState(nodeId, { status: 'waiting-human' });
     emit({ type: 'node:waiting-human', runId, nodeId, reason, blocking });
-    setRunStatus('paused-human');
+    syncRunStatus();
   };
   const leaveWaiting = (nodeId: string) => {
     waitingCount = Math.max(0, waitingCount - 1);
-    if (waitingCount === 0 && !cancelled) setRunStatus('running');
+    syncRunStatus();
     setState(nodeId, { status: 'running' });
   };
 
@@ -124,6 +166,38 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHan
       }
       case 'end':
         return evalMapping(node.outputMapping ?? {}, ctx);
+      case 'const': {
+        const v = await evalBinding(node.value, ctx);
+        return v !== null && typeof v === 'object' ? structuredClone(v) : v;
+      }
+      case 'output':
+        return evalBinding(node.value, ctx);
+      case 'input': {
+        const preset = opts?.runtimeInputs?.[node.id];
+        if (preset !== undefined) {
+          if (node.inputSchema && Object.keys(node.inputSchema).length) {
+            const r = validateData(node.inputSchema, preset);
+            if (!r.valid) throw new WtopError('INVALID_INPUT', `预置输入不符合 schema: ${r.errors}`);
+          }
+          return preset;
+        }
+        if (opts?.headless) {
+          throw new WtopError('INPUT_REQUIRED', `节点 ${node.id} 需要运行时输入，无头模式请用 --runtime-input 预置`);
+        }
+        emit({ type: 'node:input-required', runId, nodeId: nid, schema: node.inputSchema, prompt: node.prompt });
+        enterWaiting(nid, node.prompt ?? '需要运行时输入', true);
+        const value = await new Promise<unknown>((resolve, reject) => {
+          inputResolvers.set(nid, resolve);
+          controller.signal.addEventListener('abort', () => reject(new WtopError('CANCELLED', '运行被取消')), { once: true });
+        });
+        inputResolvers.delete(nid);
+        leaveWaiting(nid);
+        if (node.inputSchema && Object.keys(node.inputSchema).length) {
+          const r = validateData(node.inputSchema, value);
+          if (!r.valid) throw new WtopError('INVALID_INPUT', `输入不符合 schema: ${r.errors}`);
+        }
+        return value;
+      }
       case 'transform':
         return evalExpression(node.expression ?? '', ctx);
       case 'condition': {
@@ -151,10 +225,12 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHan
         const tool = deps.getTool(node.toolId!);
         if (!tool?.manifest) throw new EngineError('INVALID_INPUT', `工具不存在: ${node.toolId}`);
         const params = await evalMapping(node.inputMapping ?? {}, ctx);
+        emit({ type: 'node:input', runId, nodeId: nid, params });
         const call = deps.host.execute({
           toolUrl: tool.url, method: node.method!, params,
           timeoutMs: node.timeoutMs, attempt,
           preserveScene: node.preserveScene ?? true,
+          modeOverride: node.mode,
           allowSameOrigin: tool.allowSameOrigin,
           onProgress: (p) => {
             setState(nid, { percent: p.percent, text: p.text });
@@ -180,6 +256,7 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHan
         const endpoint = tool?.http?.endpoints.find((e) => e.name === node.endpoint);
         if (!tool || !endpoint) throw new EngineError('INVALID_INPUT', `HTTP 工具/endpoint 不存在: ${node.toolId}/${node.endpoint}`);
         const params = await evalMapping(node.inputMapping ?? {}, ctx);
+        emit({ type: 'node:input', runId, nodeId: nid, params });
         await acquireHttp();
         const ac = new AbortController();
         const onAbort = () => ac.abort();
@@ -232,6 +309,7 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHan
         const sub = deps.getFlow(node.flowId!);
         if (!sub) throw new EngineError('INVALID_INPUT', `子流程不存在: ${node.flowId}`);
         const input = await evalMapping(node.inputMapping ?? {}, ctx);
+        emit({ type: 'node:input', runId, nodeId: nid, params: input });
         const subCtx: RunContext = { start: { input }, nodes: {}, env: ctx.env };
         const r = await executeGraph(sub.nodes, sub.edges, subCtx, `${nid}.`, nodeStates);
         if (r.error) throw r.error.err;
@@ -327,6 +405,7 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHan
       if (prefix) ctx.nodes[node.id] = { output };
       states[nid] = { ...states[nid], status: 'succeeded', endedAt: Date.now(), percent: 100 };
       emit({ type: 'node:state', runId, nodeId: nid, state: states[nid] });
+      emit({ type: 'node:output', runId, nodeId: nid, output });
       for (const e of outgoing.get(node.id) ?? []) {
         resolveEdge(e, branchSel ? branchSel(e) : true);
       }
@@ -336,10 +415,12 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHan
       while (ready.length && !cancelled) {
         const node = ready.shift()!;
         const nid = prefix + node.id;
-        const p = execWithRetry(node, 0, ctx, prefix, scope).then(
-          (output) => ({ id: node.id, ok: true, output }),
-          (err) => ({ id: node.id, ok: false, err }),
-        );
+        const p = gate(node, prefix)
+          .then(() => execWithRetry(node, 0, ctx, prefix, scope))
+          .then(
+            (output) => ({ id: node.id, ok: true, output }),
+            (err) => ({ id: node.id, ok: false, err }),
+          );
         active.set(nid, p);
       }
       if (!active.size) break;
@@ -420,9 +501,34 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps): RunHan
       controller.abort();
       for (const call of activeWtop.values()) call.cancel('user');
       for (const resolve of approvals.values()) resolve(false);
+      releasePaused(paused.length);
     },
     resolveApproval(nodeId, approved) {
       approvals.get(nodeId)?.(approved);
+    },
+    resolveInput(nodeId, value) {
+      const resolve = inputResolvers.get(nodeId);
+      if (!resolve) return;
+      const node = dsl.nodes.find((n) => n.id === nodeId);
+      if (node?.inputSchema && Object.keys(node.inputSchema).length) {
+        const r = validateData(node.inputSchema, value);
+        if (!r.valid) throw new WtopError('INVALID_INPUT', `输入不符合 schema: ${r.errors}`);
+      }
+      resolve(value);
+    },
+    step() {
+      releasePaused(1);
+    },
+    resume() {
+      mode = 'run';
+      releasePaused(paused.length);
+    },
+    pause() {
+      mode = 'step';
+    },
+    setBreakpoints(ids) {
+      breakpoints.clear();
+      for (const id of ids) breakpoints.add(id);
     },
     done,
   };

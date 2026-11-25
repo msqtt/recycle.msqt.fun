@@ -41,7 +41,7 @@ export interface FlowRecord {
   updatedAt: number;
 }
 
-export type RunStatus = 'running' | 'paused-human' | 'succeeded' | 'failed' | 'cancelled';
+export type RunStatus = 'running' | 'paused-human' | 'paused-step' | 'succeeded' | 'failed' | 'cancelled';
 
 export interface NodeState {
   status: 'pending' | 'ready' | 'running' | 'waiting-human' | 'succeeded' | 'failed' | 'skipped' | 'cancelled';
@@ -62,6 +62,7 @@ export interface RunRecord {
   flowId: string;
   flowVersion: number;
   status: RunStatus;
+  mode?: 'run' | 'step';
   startedAt: number;
   endedAt?: number;
   nodeStates: Record<string, NodeState>;

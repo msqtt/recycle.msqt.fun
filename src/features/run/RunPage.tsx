@@ -3,64 +3,38 @@ import { Link, useParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../../db';
 import type { NodeState, LogEntry, RunStatus, BlobRecord } from '../../db/types';
-import { useRunStore } from '../../shared/run-store';
+import type { FlowNode } from '../engine/dsl';
+import type { JSONSchema } from '@wtop/types';
+import { useRunStore, type NodeIO } from '../../shared/run-store';
 import { getHost } from '../../wtop/hostClient';
-import { NeoButton, NeoBadge, PageTitle } from '../../shared/ui';
+import { NeoButton, NeoBadge, NeoModal, PageTitle } from '../../shared/ui';
+import { SchemaForm, schemaDefaults } from '../../shared/schema-form';
+import { OutputRenderer } from '../../shared/output-view';
 
 const STATUS_LABEL: Record<string, string> = {
-  running: '运行中', 'paused-human': '等待人工', succeeded: '成功', failed: '失败', cancelled: '已取消',
+  running: '运行中', 'paused-human': '等待人工', 'paused-step': '单步暂停', succeeded: '成功', failed: '失败', cancelled: '已取消',
   pending: '待执行', ready: '就绪', 'waiting-human': '等待人工', skipped: '已跳过',
 };
 
-function OutputView({ value, blobs }: { value: unknown; blobs: BlobRecord[] }) {
-  if (value !== null && typeof value === 'object' && '$blob' in (value as object)) {
-    const id = (value as { $blob: string }).$blob;
-    const b = blobs.find((x) => x.id === id);
-    return (
-      <button
-        className="border-2 border-ink bg-sky px-2 py-0.5 text-xs font-bold shadow-neo-sm hover:shadow-none"
-        onClick={() => {
-          if (!b) return;
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(b.data);
-          a.download = b.name;
-          a.click();
-          URL.revokeObjectURL(a.href);
-        }}
-      >
-        ⬇ {b?.name ?? id}（{b ? `${(b.size / 1024).toFixed(1)}KB` : '已清理'}）
-      </button>
-    );
-  }
-  if (Array.isArray(value)) {
-    return <span>[{value.map((v, i) => <span key={i} className="inline-block mr-1"><OutputView value={v} blobs={blobs} />{i < value.length - 1 ? ',' : ''}</span>)}]</span>;
-  }
-  if (value !== null && typeof value === 'object') {
-    return (
-      <span>{'{'}{Object.entries(value).map(([k, v], i, arr) => (
-        <span key={k} className="inline-block mr-1">
-          <span className="font-bold">{k}:</span> <OutputView value={v} blobs={blobs} />{i < arr.length - 1 ? ',' : ''}
-        </span>
-      ))}{'}'}</span>
-    );
-  }
-  return <span className="font-mono text-xs">{JSON.stringify(value)}</span>;
-}
-
-function NodeCard({ nodeId, state, live, flowNodes, blobs, onView, onApprove }: {
+function NodeCard({ nodeId, state, live, flowNodes, blobs, io, paused, onView, onApprove, onFillInput }: {
   nodeId: string; state: NodeState; live: boolean;
-  flowNodes: { id: string; type: string; prompt?: string }[];
+  flowNodes: FlowNode[];
   blobs: BlobRecord[];
+  io?: NodeIO;
+  paused?: boolean;
   onView: (callId: string) => void;
   onApprove: (nodeId: string, ok: boolean) => void;
+  onFillInput: () => void;
 }) {
   const node = flowNodes.find((n) => n.id === nodeId);
   const isApproval = node?.type === 'approval';
   const canView = live && state.callId && ['running', 'waiting-human', 'failed'].includes(state.status);
   return (
-    <div className="border-2 border-ink bg-white shadow-neo-sm p-3">
+    <div className={`border-2 border-ink shadow-neo-sm p-3 ${paused ? 'bg-lemon' : 'bg-white'}`}>
       <div className="flex items-center gap-2 flex-wrap">
+        {paused && <span className="w-2.5 h-2.5 rounded-full bg-punch border border-ink" title="暂停于此节点" />}
         <span className="font-mono font-bold">{nodeId}</span>
+        {node && <span className="text-[10px] uppercase opacity-60">{node.type}</span>}
         <NeoBadge tone={state.status}>{STATUS_LABEL[state.status] ?? state.status}</NeoBadge>
         {state.attempt > 1 && <span className="text-xs font-mono">第 {state.attempt} 次</span>}
         <div className="flex-1" />
@@ -84,9 +58,36 @@ function NodeCard({ nodeId, state, live, flowNodes, blobs, onView, onApprove }: 
           <NeoButton color="bg-punch" className="!px-3 !py-0.5" onClick={() => onApprove(nodeId, false)}>拒绝</NeoButton>
         </div>
       )}
+      {live && node?.type === 'input' && state.status === 'waiting-human' && (
+        <div className="mt-2">
+          <NeoButton color="bg-lemon" className="!px-3 !py-0.5" onClick={onFillInput}>✎ 填写输入</NeoButton>
+        </div>
+      )}
+      {io?.input !== undefined && (
+        <details className="mt-2">
+          <summary className="text-xs font-bold cursor-pointer opacity-70">输入（已求值入参）</summary>
+          <div className="mt-1"><OutputRenderer value={io.input} blobs={blobs} name={`${nodeId}-input`} /></div>
+        </details>
+      )}
+      {io?.output !== undefined && (
+        node?.type === 'output' ? (
+          <div className="mt-2 border-t-2 border-ink/20 pt-2">
+            <OutputRenderer
+              value={io.output} blobs={blobs}
+              format={node.format} title={node.title} filename={node.filename} mime={node.mime}
+              name={`${nodeId}`}
+            />
+          </div>
+        ) : (
+          <details className="mt-2" open={paused}>
+            <summary className="text-xs font-bold cursor-pointer opacity-70">输出</summary>
+            <div className="mt-1"><OutputRenderer value={io.output} blobs={blobs} name={`${nodeId}-output`} /></div>
+          </details>
+        )
+      )}
       {!live && state.blobIds && state.blobIds.length > 0 && (
         <div className="mt-2 flex gap-1 flex-wrap">
-          {state.blobIds.map((id) => <OutputView key={id} value={{ $blob: id }} blobs={blobs} />)}
+          {state.blobIds.map((id) => <OutputRenderer key={id} value={{ $blob: id }} blobs={blobs} name={nodeId} />)}
         </div>
       )}
     </div>
@@ -137,6 +138,33 @@ function ViewDrawer({ callId, onClose }: { callId: string; onClose: () => void }
   );
 }
 
+function InputModal({ request, onSubmit, onCancel }: {
+  request: { nodeId: string; schema?: unknown; prompt?: string };
+  onSubmit: (value: Record<string, unknown>) => void;
+  onCancel: () => void;
+}) {
+  const schema = (request.schema ?? { type: 'object', properties: {} }) as JSONSchema;
+  const [value, setValue] = useState<Record<string, unknown>>(() => schemaDefaults(schema));
+  const [err, setErr] = useState('');
+  const submit = () => {
+    try { onSubmit(value); setErr(''); } catch (e) {
+      const code = (e as { code?: string }).code;
+      setErr(`${code ? `[${code}] ` : ''}${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  return (
+    <NeoModal title={`输入 · ${request.nodeId}`} onClose={onCancel}>
+      {request.prompt && <p className="text-sm font-bold mb-3">{request.prompt}</p>}
+      <SchemaForm schema={schema} value={value} onChange={setValue} allowBindings={false} />
+      {err && <p className="text-xs font-mono bg-punch/30 border-2 border-punch px-2 py-1 mb-2">{err}</p>}
+      <div className="mt-4 flex justify-end gap-2">
+        <NeoButton color="bg-white" onClick={onCancel}>稍后填写</NeoButton>
+        <NeoButton color="bg-lime" onClick={submit}>提交</NeoButton>
+      </div>
+    </NeoModal>
+  );
+}
+
 export function RunPage() {
   const { runId } = useParams<{ runId: string }>();
   const store = useRunStore();
@@ -151,30 +179,55 @@ export function RunPage() {
     [live, store.flowId, record?.flowId],
   );
   const [viewCallId, setViewCallId] = useState<string | null>(null);
+  const [inputHidden, setInputHidden] = useState(false);
+  useEffect(() => { setInputHidden(false); }, [store.inputRequest?.nodeId]);
 
   const status: RunStatus | null = live ? store.status : record?.status ?? null;
   const nodeStates: Record<string, NodeState> = live ? store.nodeStates : record?.nodeStates ?? {};
   const logs = live ? store.logs : record?.logs ?? [];
   const output = live ? store.output : record?.output;
   const error = live ? store.error : record?.error;
+  const mode = live ? store.mode : record?.mode;
+  const nodeIO: Record<string, NodeIO> = live
+    ? store.nodeIO
+    : Object.fromEntries(Object.entries((record?.contextMeta ?? {}) as Record<string, unknown>).map(([k, v]) => [k, { output: v }]));
   const flowNodes = flow?.dsl.nodes ?? [];
   const orderedIds = flowNodes.length
     ? flowNodes.map((n) => n.id).filter((id) => id in nodeStates || live)
     : Object.keys(nodeStates);
+  const flowName = live ? store.flowName : flow?.name ?? '运行';
+  const stepActive = live && (status === 'running' || status === 'paused-step') && (store.mode === 'step' || status === 'paused-step');
 
   if (!live && !record) return <p className="font-mono p-6">加载中…</p>;
 
   return (
     <div className="p-6 max-w-4xl mx-auto" style={{ marginRight: viewCallId ? 500 : undefined }}>
       <div className="flex items-center gap-3 mb-6 flex-wrap">
-        <PageTitle sub={runId}>{live ? store.flowName : flow?.name ?? '运行'}</PageTitle>
+        <PageTitle sub={runId}>{flowName}</PageTitle>
         <div className="flex-1" />
+        {mode === 'step' && <NeoBadge tone="ok">试运行</NeoBadge>}
         {status && <span data-run-status={status}><NeoBadge tone={status}>{STATUS_LABEL[status] ?? status}</NeoBadge></span>}
-        {live && (status === 'running' || status === 'paused-human') && (
+        {live && (status === 'running' || status === 'paused-human' || status === 'paused-step') && (
           <NeoButton color="bg-punch" onClick={() => store.cancel()}>■ 取消运行</NeoButton>
         )}
         <Link to="/history" className="font-bold text-sm underline">历史 →</Link>
       </div>
+
+      {stepActive && (
+        <div className="border-2 border-ink bg-lemon shadow-neo p-2 mb-4 flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-black uppercase">试运行控制</span>
+          {store.pausedNodeId
+            ? <span className="font-mono text-xs">暂停于 <b>{store.pausedNodeId}</b>（展开上游输出审查后放行）</span>
+            : <span className="font-mono text-xs">运行中…</span>}
+          <div className="flex-1" />
+          <NeoButton color="bg-white" className="!px-2 !py-0.5 text-xs" disabled={status !== 'paused-step'} onClick={() => store.step()}>⏭ 单步</NeoButton>
+          <NeoButton color="bg-sky" className="!px-2 !py-0.5 text-xs" disabled={status !== 'paused-step'} onClick={() => store.resume()}>▶ 继续</NeoButton>
+          <NeoButton color="bg-lime" className="!px-2 !py-0.5 text-xs" onClick={() => store.runToEnd()}>⏩ 跑到底</NeoButton>
+          {status === 'running' && store.mode === 'run' && (
+            <NeoButton color="bg-white" className="!px-2 !py-0.5 text-xs" onClick={() => store.pause()}>⏸ 暂停</NeoButton>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="border-2 border-ink bg-punch shadow-neo p-3 mb-4 font-mono text-sm">
@@ -191,16 +244,19 @@ export function RunPage() {
             live={live}
             flowNodes={flowNodes}
             blobs={blobs}
+            io={nodeIO[id]}
+            paused={live && store.pausedNodeId === id}
             onView={setViewCallId}
             onApprove={(nid, ok) => store.resolveApproval(nid, ok)}
+            onFillInput={() => setInputHidden(false)}
           />
         ))}
       </div>
 
-      {(status === 'succeeded' || (!live && output !== undefined)) && (
-        <div className="border-2 border-ink bg-lime shadow-neo p-3 mb-6">
-          <p className="font-black uppercase text-sm mb-2">输出</p>
-          <div className="text-sm break-all"><OutputView value={output} blobs={blobs} /></div>
+      {output !== undefined && (
+        <div className={`border-2 border-ink shadow-neo p-3 mb-6 ${status === 'succeeded' ? 'bg-lime' : 'bg-white'}`}>
+          <p className="font-black uppercase text-sm mb-2">流程输出（end）</p>
+          <OutputRenderer value={output} blobs={blobs} name={`${flowName}-end`} />
         </div>
       )}
 
@@ -208,6 +264,15 @@ export function RunPage() {
       <LogPanel logs={logs} />
 
       {viewCallId && <ViewDrawer callId={viewCallId} onClose={() => setViewCallId(null)} />}
+
+      {live && store.inputRequest && !inputHidden && (
+        <InputModal
+          key={store.inputRequest.nodeId}
+          request={store.inputRequest}
+          onSubmit={(v) => store.resolveInput(store.inputRequest!.nodeId, v)}
+          onCancel={() => setInputHidden(true)}
+        />
+      )}
     </div>
   );
 }
@@ -226,6 +291,7 @@ export function HistoryPage() {
             <div className="flex items-center gap-3 flex-wrap">
               <span className="font-black">{nameOf(r.flowId)}</span>
               <NeoBadge tone={r.status}>{STATUS_LABEL[r.status] ?? r.status}</NeoBadge>
+              {r.mode === 'step' && <NeoBadge tone="ok">试运行</NeoBadge>}
               <span className="font-mono text-xs opacity-60">v{r.flowVersion} · {new Date(r.startedAt).toLocaleString()}</span>
               <div className="flex-1" />
               {r.error && <span className="font-mono text-xs text-punch font-bold">[{r.error.code}]</span>}

@@ -1,5 +1,5 @@
 import { type Transport, type Viewport } from '@wtop/core';
-import { type CallState, type CancelReason, type Logger, type Progress, type Unsubscribe, type WaitingHumanInfo } from '@wtop/types';
+import { type CallState, type CancelReason, type Logger, type MethodMode, type Progress, type Unsubscribe, type WaitingHumanInfo } from '@wtop/types';
 import { type ViewRect } from './layer.js';
 import { type RegistryClient, type RegistryOptions } from './registry.js';
 export interface HostInstance {
@@ -43,6 +43,8 @@ export interface ExecuteOptions {
     allowSameOrigin?: boolean;
     viewport?: Viewport;
     preserveScene?: boolean;
+    /** 覆盖 manifest 方法模式（HOST 节点配置）；hybrid/interactive 覆盖会禁用池化复用 */
+    modeOverride?: MethodMode;
     onProgress?: (p: Progress) => void;
     onWaitingHuman?: (info: WaitingHumanInfo) => void;
     onState?: (s: CallState) => void;

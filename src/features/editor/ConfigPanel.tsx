@@ -1,10 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { FlowNode, DSL } from '../engine/dsl';
 import type { ToolRecord, FlowRecord } from '../../db/types';
+import type { JSONSchema } from '@wtop/types';
 import { SchemaForm, schemaDefaults } from '../../shared/schema-form';
 import { NeoInput, NeoSelect, NeoTextarea, Field } from '../../shared/ui';
 import { evalExpression } from '../engine/expr';
-import { useState } from 'react';
 
 function JsonField({ label, value, onChange, rows = 6, hint }: {
   label: string; value: unknown; onChange: (v: unknown) => void; rows?: number; hint?: string;
@@ -47,13 +47,134 @@ function ExpressionField({ value, onChange }: { value: string; onChange: (v: str
   );
 }
 
-export function ConfigPanel({ node, dsl, tools, flows, onChange, bindingOptions }: {
+const FIELD_TYPES = ['string', 'number', 'boolean', 'object', 'array', 'file'] as const;
+type FieldType = typeof FIELD_TYPES[number];
+
+interface FieldRow { name: string; type: FieldType; required: boolean; def: string; desc: string }
+
+function schemaToRows(schema: JSONSchema | undefined): FieldRow[] {
+  const props = (schema?.properties ?? {}) as Record<string, Record<string, unknown>>;
+  const required = new Set((schema?.required ?? []) as string[]);
+  return Object.entries(props).map(([name, p]) => ({
+    name,
+    type: (p.format === 'wtop-file' ? 'file' : (p.type as FieldType) ?? 'string'),
+    required: required.has(name),
+    def: p.default === undefined ? '' : typeof p.default === 'string' ? p.default : JSON.stringify(p.default),
+    desc: (p.description as string) ?? (p.title as string) ?? '',
+  }));
+}
+
+function rowsToSchema(rows: FieldRow[]): JSONSchema {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const r of rows) {
+    if (!r.name) continue;
+    const p: Record<string, unknown> = r.type === 'file'
+      ? { type: 'string', format: 'wtop-file' }
+      : { type: r.type };
+    if (r.desc) p.description = r.desc;
+    if (r.def !== '') {
+      if (r.type === 'number') { const n = Number(r.def); if (!Number.isNaN(n)) p.default = n; }
+      else if (r.type === 'boolean') p.default = r.def === 'true';
+      else if (r.type === 'object' || r.type === 'array') { try { p.default = JSON.parse(r.def); } catch { /* 忽略不合法默认值 */ } }
+      else if (r.type === 'string') p.default = r.def;
+    }
+    properties[r.name] = p;
+    if (r.required) required.push(r.name);
+  }
+  return { type: 'object', properties, ...(required.length ? { required } : {}) } as JSONSchema;
+}
+
+/** start/input 的友好字段编辑器：增删行即生成 inputSchema */
+function SchemaFieldsEditor({ schema, onChange }: { schema: JSONSchema | undefined; onChange: (v: JSONSchema) => void }) {
+  const [rows, setRows] = useState<FieldRow[]>(() => schemaToRows(schema));
+  const update = (next: FieldRow[]) => { setRows(next); onChange(rowsToSchema(next)); };
+  const setRow = (i: number, p: Partial<FieldRow>) => update(rows.map((r, j) => (j === i ? { ...r, ...p } : r)));
+  return (
+    <div className="mb-3">
+      <p className="text-xs font-black uppercase mb-1.5">输入字段</p>
+      {rows.map((r, i) => (
+        <div key={i} className="border-2 border-ink/30 p-2 mb-2">
+          <div className="flex gap-1.5 mb-1.5">
+            <NeoInput value={r.name} placeholder="字段名" className="!w-28 font-mono"
+              onChange={(e) => setRow(i, { name: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} />
+            <NeoSelect value={r.type} onChange={(e) => setRow(i, { type: e.target.value as FieldType })}>
+              {FIELD_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </NeoSelect>
+            <label className="flex items-center gap-1 text-xs font-bold shrink-0">
+              <input type="checkbox" checked={r.required} onChange={(e) => setRow(i, { required: e.target.checked })} />必填
+            </label>
+            <button type="button" onClick={() => update(rows.filter((_, j) => j !== i))}
+              className="border-2 border-ink bg-punch px-2 text-xs font-black shrink-0">×</button>
+          </div>
+          <div className="flex gap-1.5">
+            <NeoInput value={r.def} placeholder={r.type === 'boolean' ? 'true / false' : '默认值（可空）'} className="flex-1"
+              onChange={(e) => setRow(i, { def: e.target.value })} />
+            <NeoInput value={r.desc} placeholder="描述（可空）" className="flex-1"
+              onChange={(e) => setRow(i, { desc: e.target.value })} />
+          </div>
+        </div>
+      ))}
+      <button type="button" onClick={() => update([...rows, { name: '', type: 'string', required: false, def: '', desc: '' }])}
+        className="border-2 border-ink bg-lemon px-2 py-1 text-xs font-bold shadow-neo-sm hover:shadow-none">+ 添加字段</button>
+      <details className="mt-2">
+        <summary className="text-xs font-bold cursor-pointer opacity-70">高级：直接编辑 JSON</summary>
+        <JsonField label="inputSchema" value={rowsToSchema(rows)} onChange={(v) => { onChange(v as JSONSchema); setRows(schemaToRows(v as JSONSchema)); }} rows={8} />
+      </details>
+    </div>
+  );
+}
+
+/** end 快速绑定：上游可达输出一键写入 outputMapping */
+function EndQuickBind({ bindingOptions, mapping, onChange }: {
+  bindingOptions: string[];
+  mapping: Record<string, unknown>;
+  onChange: (v: Record<string, unknown>) => void;
+}) {
+  const options = bindingOptions.filter((p) => p.startsWith('context.nodes.') || p.startsWith('context.start.input'));
+  const keyFor = (path: string): string => {
+    if (path === 'context.start.input') return 'input';
+    if (path.endsWith('.output')) return path.split('.')[2];
+    return path.split('.').pop()!;
+  };
+  return (
+    <div className="mb-3">
+      <p className="text-xs font-black uppercase mb-1.5">快速绑定上游输出</p>
+      {options.length === 0 && (
+        <p className="text-xs font-mono opacity-60">暂无上游节点——先把业务节点接到 end 之前</p>
+      )}
+      <div className="max-h-48 overflow-auto space-y-1">
+        {options.map((path) => {
+          const key = keyFor(path);
+          const bound = mapping[key] === `{{${path}}}`;
+          return (
+            <div key={path} className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={bound}
+                onClick={() => onChange({ ...mapping, [key]: `{{${path}}}` })}
+                className={`border-2 border-ink px-1.5 text-xs font-black shrink-0 ${bound ? 'bg-lime' : 'bg-white hover:bg-lemon'}`}
+              >
+                {bound ? '✓' : '＋'}
+              </button>
+              <span className="text-[11px] font-mono truncate" title={path}>{key} ← {path}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function ConfigPanel({ node, dsl, tools, flows, onChange, bindingOptions, breakpoint, onToggleBreakpoint }: {
   node: FlowNode;
   dsl: DSL;
   tools: ToolRecord[];
   flows: FlowRecord[];
   onChange: (patch: Partial<FlowNode>) => void;
   bindingOptions: string[];
+  breakpoint?: boolean;
+  onToggleBreakpoint?: () => void;
 }) {
   const wtopTools = tools.filter((t) => t.type === 'wtop');
   const httpTools = tools.filter((t) => t.type === 'http');
@@ -62,6 +183,7 @@ export function ConfigPanel({ node, dsl, tools, flows, onChange, bindingOptions 
   const endpoint = tool?.http?.endpoints.find((e) => e.name === node.endpoint);
 
   const retry = node.retry ?? { max: 0 };
+  const bindListId = `bind-${node.id}`;
 
   return (
     <div className="text-sm">
@@ -70,12 +192,87 @@ export function ConfigPanel({ node, dsl, tools, flows, onChange, bindingOptions 
         <span className="font-mono text-xs">{node.id}</span>
       </div>
 
+      {node.type !== 'start' && node.type !== 'end' && onToggleBreakpoint && (
+        <label className="flex items-center gap-2 mb-3 font-bold text-xs border-2 border-ink/30 p-2">
+          <input type="checkbox" checked={breakpoint ?? false} onChange={onToggleBreakpoint} />
+          <span className="w-2.5 h-2.5 rounded-full bg-punch border border-ink inline-block" />
+          断点（运行到此节点前暂停）
+        </label>
+      )}
+
       {node.type === 'start' && (
-        <JsonField label="流程输入 inputSchema" value={node.inputSchema} onChange={(v) => onChange({ inputSchema: v as never })} rows={8} />
+        <SchemaFieldsEditor schema={node.inputSchema} onChange={(v) => onChange({ inputSchema: v })} />
       )}
       {node.type === 'end' && (
-        <JsonField label="输出映射 outputMapping" value={node.outputMapping} onChange={(v) => onChange({ outputMapping: v as never })}
-          hint='如 {"url": "{{context.nodes.upload.output.url}}"}' />
+        <>
+          {Object.keys(node.outputMapping ?? {}).length === 0 && (
+            <p className="border-2 border-ink bg-lemon px-2 py-1.5 text-xs font-bold mb-3">
+              ⚠ 输出映射为空 → 流程输出将是 {'{}'}。用下方快速绑定或手动编辑。
+            </p>
+          )}
+          <EndQuickBind
+            bindingOptions={bindingOptions}
+            mapping={node.outputMapping ?? {}}
+            onChange={(v) => onChange({ outputMapping: v })}
+          />
+          <JsonField label="输出映射 outputMapping" value={node.outputMapping} onChange={(v) => onChange({ outputMapping: v as never })}
+            hint='如 {"url": "{{context.nodes.upload.output.url}}"}' />
+        </>
+      )}
+
+      {node.type === 'const' && (
+        <JsonField label="常量值 value（JSON）" value={node.value} onChange={(v) => onChange({ value: v })} rows={8}
+          hint='字面量即常量；字符串 "{{表达式}}" 会在运行期求值' />
+      )}
+
+      {node.type === 'input' && (
+        <>
+          <Field label="提示语 prompt">
+            <NeoInput value={node.prompt ?? ''} onChange={(e) => onChange({ prompt: e.target.value })} placeholder="请输入…" />
+          </Field>
+          <SchemaFieldsEditor schema={node.inputSchema} onChange={(v) => onChange({ inputSchema: v })} />
+          <p className="text-xs font-mono opacity-60 mb-3">运行到此节点时暂停，看板弹表单等用户提交；无头运行需预置值（wtop run --runtime-input）。</p>
+        </>
+      )}
+
+      {node.type === 'output' && (
+        <>
+          <Field label="输出值 value（常量 / 绑定）" hint="透传给下游，可继续绑定 context.nodes.<此节点>.output">
+            <datalist id={bindListId}>
+              {bindingOptions.map((p) => <option key={p} value={`{{${p}}}`} />)}
+            </datalist>
+            <NeoInput
+              list={bindListId}
+              value={typeof node.value === 'string' ? node.value : JSON.stringify(node.value ?? null)}
+              placeholder="{{context.nodes.xxx.output.yyy}}"
+              onChange={(e) => {
+                const t = e.target.value;
+                if (t.startsWith('{{') || t === '' || !/^[\[{"]/.test(t.trim())) onChange({ value: t });
+                else { try { onChange({ value: JSON.parse(t) }); } catch { onChange({ value: t }); } }
+              }}
+            />
+          </Field>
+          <Field label="标题 title（展示用，可空）">
+            <NeoInput value={node.title ?? ''} onChange={(e) => onChange({ title: e.target.value || undefined })} />
+          </Field>
+          <Field label="展示格式 format">
+            <NeoSelect value={node.format ?? 'auto'} onChange={(e) => onChange({ format: e.target.value as never })}>
+              <option value="auto">auto（按类型）</option>
+              <option value="json">json</option>
+              <option value="text">text</option>
+              <option value="table">table（对象数组）</option>
+            </NeoSelect>
+          </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="下载文件名（可空）">
+              <NeoInput value={node.filename ?? ''} onChange={(e) => onChange({ filename: e.target.value || undefined })} placeholder="result.json" />
+            </Field>
+            <Field label="MIME（可空）">
+              <NeoInput value={node.mime ?? ''} onChange={(e) => onChange({ mime: e.target.value || undefined })} placeholder="text/plain" />
+            </Field>
+          </div>
+          <p className="text-xs font-mono opacity-60 mb-3">看板节点卡片提供 展示 / ⬇ 下载 / 🖨 打印 / 复制。</p>
+        </>
       )}
 
       {(node.type === 'call-wtop' || node.type === 'call-http') && (
@@ -159,11 +356,22 @@ export function ConfigPanel({ node, dsl, tools, flows, onChange, bindingOptions 
             </div>
           )}
           {node.type === 'call-wtop' && (
-            <label className="flex items-center gap-2 mb-3 font-bold text-xs">
-              <input type="checkbox" checked={node.preserveScene ?? true}
-                onChange={(e) => onChange({ preserveScene: e.target.checked })} />
-              失败保留现场
-            </label>
+            <>
+              <Field label="模式覆盖（默认跟随方法声明）">
+                <NeoSelect className="w-full" value={node.mode ?? ''}
+                  onChange={(e) => onChange({ mode: (e.target.value || undefined) as never })}>
+                  <option value="">默认（{methodDef?.mode ?? 'hybrid'}）</option>
+                  <option value="headless">headless（不弹画面）</option>
+                  <option value="hybrid">hybrid（可查看现场）</option>
+                  <option value="interactive">interactive（强制交互）</option>
+                </NeoSelect>
+              </Field>
+              <label className="flex items-center gap-2 mb-3 font-bold text-xs">
+                <input type="checkbox" checked={node.preserveScene ?? true}
+                  onChange={(e) => onChange({ preserveScene: e.target.checked })} />
+                失败保留现场
+              </label>
+            </>
           )}
         </>
       )}
@@ -254,17 +462,23 @@ export function useBindingOptions(dsl: DSL, nodeId: string, tools: ToolRecord[])
         const props = Object.keys((n.inputSchema?.properties ?? {}) as object);
         for (const p of props) opts.push(`context.start.input.${p}`);
         opts.push('context.start.input');
-      } else {
-        opts.push(`context.nodes.${id}.output`);
+        continue;
+      }
+      opts.push(`context.nodes.${id}.output`);
+      let outProps: object | undefined;
+      if (n.type === 'call-wtop' || n.type === 'call-http') {
         const tool = tools.find((t) => t.id === n.toolId);
         const outSchema = n.type === 'call-wtop'
           ? tool?.manifest?.methods.find((m) => m.name === n.method)?.output
-          : n.type === 'call-http'
-            ? tool?.http?.endpoints.find((e) => e.name === n.endpoint)?.output
-            : undefined;
-        for (const p of Object.keys((outSchema?.properties ?? {}) as object)) {
-          opts.push(`context.nodes.${id}.output.${p}`);
-        }
+          : tool?.http?.endpoints.find((e) => e.name === n.endpoint)?.output;
+        outProps = (outSchema?.properties ?? undefined) as object | undefined;
+      } else if (n.type === 'input') {
+        outProps = (n.inputSchema?.properties ?? undefined) as object | undefined;
+      } else if (n.type === 'const' && n.value !== null && typeof n.value === 'object' && !Array.isArray(n.value)) {
+        outProps = n.value as object;
+      }
+      for (const p of Object.keys(outProps ?? {})) {
+        opts.push(`context.nodes.${id}.output.${p}`);
       }
     }
     opts.push('context.loop.item', 'context.loop.index');

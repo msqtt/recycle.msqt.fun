@@ -351,3 +351,161 @@ describe('引擎 E1–E15', () => {
     expect(r.error?.nodeId).toBe('start');
   });
 });
+
+describe('引擎 v2 E16–E25', () => {
+  it('E16 const→transform→end + node:input/output 事件', async () => {
+    const { host } = mockHost({ echo: (p) => p });
+    const { deps: d, events } = deps({ host });
+    const r = await runFlow(dsl(
+      [start(), { id: 'k', type: 'const', value: { n: 7 } },
+        { id: 'c', type: 'call-wtop', toolId: 'tool', method: 'echo', inputMapping: { v: '{{context.nodes.k.output.n}}' } },
+        end({ out: '{{context.nodes.c.output.v}}' })],
+      [{ from: 'start', to: 'k' }, { from: 'k', to: 'c' }, { from: 'c', to: 'end' }],
+    ), {}, d).done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ out: 7 });
+    const inputEv = events.find((e) => e.type === 'node:input' && e.nodeId === 'c');
+    expect(inputEv && inputEv.type === 'node:input' && inputEv.params).toEqual({ v: 7 });
+    const outEv = events.find((e) => e.type === 'node:output' && e.nodeId === 'k');
+    expect(outEv && outEv.type === 'node:output' && outEv.output).toEqual({ n: 7 });
+  });
+
+  it('E17 input 节点：UI 提交 + schema 校验', async () => {
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({ host });
+    const handle = runFlow(dsl(
+      [start(), { id: 'ask', type: 'input', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }, prompt: '你的名字？' },
+        end({ out: '{{context.nodes.ask.output.name}}' })],
+      [{ from: 'start', to: 'ask' }, { from: 'ask', to: 'end' }],
+    ), {}, d);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events.some((e) => e.type === 'node:input-required' && e.nodeId === 'ask')).toBe(true);
+    expect(events.some((e) => e.type === 'run:state' && e.status === 'paused-human')).toBe(true);
+    expect(() => handle.resolveInput('ask', {})).toThrow();
+    handle.resolveInput('ask', { name: 'bob' });
+    const r = await handle.done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ out: 'bob' });
+  });
+
+  it('E18 input 节点：无头预置值直接通过', async () => {
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({ host });
+    const r = await runFlow(dsl(
+      [start(), { id: 'ask', type: 'input', inputSchema: { type: 'object', properties: { n: { type: 'number' } } } },
+        end({ out: '{{context.nodes.ask.output.n}}' })],
+      [{ from: 'start', to: 'ask' }, { from: 'ask', to: 'end' }],
+    ), {}, d, { runtimeInputs: { ask: { n: 42 } } }).done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ out: 42 });
+    expect(events.some((e) => e.type === 'node:input-required')).toBe(false);
+  });
+
+  it('E19 input 节点：无头无预置 → INPUT_REQUIRED', async () => {
+    const { host } = mockHost({});
+    const { deps: d } = deps({ host });
+    const r = await runFlow(dsl(
+      [start(), { id: 'ask', type: 'input', inputSchema: { type: 'object', properties: {} } }, end({})],
+      [{ from: 'start', to: 'ask' }, { from: 'ask', to: 'end' }],
+    ), {}, d, { headless: true }).done;
+    expect(r.status).toBe('failed');
+    expect(r.error?.code).toBe('INPUT_REQUIRED');
+    expect(r.error?.nodeId).toBe('ask');
+  });
+
+  it('E20 output 节点透传 + 多 output 独立', async () => {
+    const { host } = mockHost({});
+    const { deps: d } = deps({ host });
+    const r = await runFlow(dsl(
+      [start({ s: { type: 'string' } }),
+        { id: 'o1', type: 'output', value: '{{context.start.input.s}}', title: '预览' },
+        { id: 'o2', type: 'output', value: '前缀-{{context.nodes.o1.output}}' },
+        end({ out: '{{context.nodes.o2.output}}' })],
+      [{ from: 'start', to: 'o1' }, { from: 'o1', to: 'o2' }, { from: 'o2', to: 'end' }],
+    ), { s: 'hi' }, d).done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ out: '前缀-hi' });
+    expect(r.context.nodes.o1.output).toBe('hi');
+  });
+
+  it('E21 start→end 直连旁路：end 先完成输出 {}', async () => {
+    const { host } = mockHost({});
+    const { deps: d } = deps({ host });
+    const r = await runFlow(dsl(
+      [start(), t('side', '"later"'), end({})],
+      [{ from: 'start', to: 'end' }, { from: 'start', to: 'side' }],
+    ), {}, d).done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({});
+  });
+
+  it('E22 step 模式逐节点暂停 + step() 放行', async () => {
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({ host });
+    const handle = runFlow(dsl(
+      [start(), t('a', '1'), t('b', '2'), end({ out: '{{context.nodes.b.output}}' })],
+      [{ from: 'start', to: 'a' }, { from: 'a', to: 'b' }, { from: 'b', to: 'end' }],
+    ), {}, d, { mode: 'step' });
+    const pausedSeq: string[] = [];
+    const timer = setInterval(() => {
+      const last = [...events].reverse().find((e) => e.type === 'node:paused');
+      if (last && last.type === 'node:paused' && pausedSeq[pausedSeq.length - 1] !== last.nodeId) {
+        pausedSeq.push(last.nodeId);
+        handle.step();
+      }
+    }, 10);
+    const r = await handle.done;
+    clearInterval(timer);
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ out: 2 });
+    expect(pausedSeq).toEqual(['start', 'a', 'b', 'end']);
+    expect(events.some((e) => e.type === 'run:state' && e.status === 'paused-step')).toBe(true);
+  });
+
+  it('E23 断点命中仅暂停断点节点 + resume 跑到底', async () => {
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({ host });
+    const handle = runFlow(dsl(
+      [start(), t('a', '1'), t('b', '2'), end({ out: '{{context.nodes.b.output}}' })],
+      [{ from: 'start', to: 'a' }, { from: 'a', to: 'b' }, { from: 'b', to: 'end' }],
+    ), {}, d, { breakpoints: ['b'] });
+    await new Promise((r) => setTimeout(r, 30));
+    const pausedEvents = events.filter((e) => e.type === 'node:paused');
+    expect(pausedEvents.map((e) => e.type === 'node:paused' && e.nodeId)).toEqual(['b']);
+    expect(events.some((e) => e.type === 'node:output' && e.nodeId === 'a')).toBe(true);
+    handle.resume();
+    const r = await handle.done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ out: 2 });
+  });
+
+  it('E24 pause/resume 切换', async () => {
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({ host });
+    const handle = runFlow(dsl(
+      [start(), t('a', '1'), t('b', '2'), end({ out: '{{context.nodes.b.output}}' })],
+      [{ from: 'start', to: 'a' }, { from: 'a', to: 'b' }, { from: 'b', to: 'end' }],
+    ), {}, d);
+    handle.pause();
+    await new Promise((r) => setTimeout(r, 20));
+    handle.step();
+    await new Promise((r) => setTimeout(r, 20));
+    handle.resume();
+    const r = await handle.done;
+    expect(r.status).toBe('succeeded');
+    expect(events.some((e) => e.type === 'node:paused')).toBe(true);
+  });
+
+  it('E25 step 中取消 → cancelled', async () => {
+    const { host } = mockHost({});
+    const { deps: d } = deps({ host });
+    const handle = runFlow(dsl(
+      [start(), t('a', '1'), end({})],
+      [{ from: 'start', to: 'a' }, { from: 'a', to: 'end' }],
+    ), {}, d, { mode: 'step' });
+    await new Promise((r) => setTimeout(r, 20));
+    handle.cancel();
+    const r = await handle.done;
+    expect(r.status).toBe('cancelled');
+  });
+});
