@@ -1,15 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../../db';
-import type { NodeState, LogEntry, RunStatus, BlobRecord } from '../../db/types';
+import type { NodeState, RunStatus, BlobRecord } from '../../db/types';
 import type { FlowNode } from '../engine/dsl';
-import type { JSONSchema } from '@wtop/types';
 import { useRunStore, type NodeIO } from '../../shared/run-store';
-import { getHost } from '../../wtop/hostClient';
-import { NeoButton, NeoBadge, NeoModal, PageTitle } from '../../shared/ui';
-import { SchemaForm, schemaDefaults } from '../../shared/schema-form';
+import { NeoButton, NeoBadge, PageTitle } from '../../shared/ui';
 import { OutputRenderer } from '../../shared/output-view';
+import { LogPanel, ViewDrawer, InputModal } from '../../shared/run-widgets';
 
 const STATUS_LABEL: Record<string, string> = {
   running: '运行中', 'paused-human': '等待人工', 'paused-step': '单步暂停', succeeded: '成功', failed: '失败', cancelled: '已取消',
@@ -70,11 +68,11 @@ function NodeCard({ nodeId, state, live, flowNodes, blobs, io, paused, onView, o
         </details>
       )}
       {io?.output !== undefined && (
-        node?.type === 'output' ? (
+        node?.type === 'output' || node?.type === 'end' ? (
           <div className="mt-2 border-t-2 border-ink/20 pt-2">
             <OutputRenderer
               value={io.output} blobs={blobs}
-              format={node.format} title={node.title} filename={node.filename} mime={node.mime}
+              format={node.format} title={node.type === 'end' ? '流程输出' : node.title} filename={node.filename} mime={node.mime}
               name={`${nodeId}`}
             />
           </div>
@@ -91,77 +89,6 @@ function NodeCard({ nodeId, state, live, flowNodes, blobs, io, paused, onView, o
         </div>
       )}
     </div>
-  );
-}
-
-function LogPanel({ logs }: { logs: LogEntry[] }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { ref.current?.scrollTo(0, ref.current.scrollHeight); }, [logs.length]);
-  return (
-    <div ref={ref} className="border-2 border-ink bg-ink text-lime font-mono text-xs p-3 h-56 overflow-auto">
-      {logs.length === 0 && <p className="opacity-50">暂无日志</p>}
-      {logs.map((l, i) => (
-        <p key={i} className={l.level === 'error' ? 'text-punch' : l.level === 'warn' ? 'text-tang' : ''}>
-          <span className="opacity-50">{new Date(l.at).toLocaleTimeString()}</span>
-          {l.nodeId ? ` [${l.nodeId}]` : ''} {l.message}
-        </p>
-      ))}
-    </div>
-  );
-}
-
-/** 右侧查看抽屉：把 iframe 定位到抽屉区域（固定层，不 reparent） */
-function ViewDrawer({ callId, onClose }: { callId: string; onClose: () => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    let host: Awaited<ReturnType<typeof getHost>> | null = null;
-    const place = async () => {
-      host = await getHost();
-      const r = ref.current?.getBoundingClientRect();
-      if (r) host.show(callId, { left: r.x, top: r.y, width: r.width, height: r.height });
-    };
-    void place();
-    window.addEventListener('resize', place);
-    return () => {
-      window.removeEventListener('resize', place);
-      void host?.hide(callId);
-    };
-  }, [callId]);
-  return (
-    <div className="fixed right-0 top-16 bottom-0 w-[480px] z-[900] border-l-2 border-ink bg-paper flex flex-col">
-      <div className="flex items-center justify-between px-3 py-2 border-b-2 border-ink bg-lemon">
-        <span className="font-bold text-sm uppercase">工具现场 · {callId.slice(0, 8)}</span>
-        <NeoButton color="bg-white" className="!px-2 !py-0.5" onClick={onClose}>收起</NeoButton>
-      </div>
-      <div ref={ref} className="flex-1 m-2 border-2 border-dashed border-ink/40" />
-    </div>
-  );
-}
-
-function InputModal({ request, onSubmit, onCancel }: {
-  request: { nodeId: string; schema?: unknown; prompt?: string };
-  onSubmit: (value: Record<string, unknown>) => void;
-  onCancel: () => void;
-}) {
-  const schema = (request.schema ?? { type: 'object', properties: {} }) as JSONSchema;
-  const [value, setValue] = useState<Record<string, unknown>>(() => schemaDefaults(schema));
-  const [err, setErr] = useState('');
-  const submit = () => {
-    try { onSubmit(value); setErr(''); } catch (e) {
-      const code = (e as { code?: string }).code;
-      setErr(`${code ? `[${code}] ` : ''}${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-  return (
-    <NeoModal title={`输入 · ${request.nodeId}`} onClose={onCancel}>
-      {request.prompt && <p className="text-sm font-bold mb-3">{request.prompt}</p>}
-      <SchemaForm schema={schema} value={value} onChange={setValue} allowBindings={false} />
-      {err && <p className="text-xs font-mono bg-punch/30 border-2 border-punch px-2 py-1 mb-2">{err}</p>}
-      <div className="mt-4 flex justify-end gap-2">
-        <NeoButton color="bg-white" onClick={onCancel}>稍后填写</NeoButton>
-        <NeoButton color="bg-lime" onClick={submit}>提交</NeoButton>
-      </div>
-    </NeoModal>
   );
 }
 
@@ -185,7 +112,6 @@ export function RunPage() {
   const status: RunStatus | null = live ? store.status : record?.status ?? null;
   const nodeStates: Record<string, NodeState> = live ? store.nodeStates : record?.nodeStates ?? {};
   const logs = live ? store.logs : record?.logs ?? [];
-  const output = live ? store.output : record?.output;
   const error = live ? store.error : record?.error;
   const mode = live ? store.mode : record?.mode;
   const nodeIO: Record<string, NodeIO> = live
@@ -252,13 +178,6 @@ export function RunPage() {
           />
         ))}
       </div>
-
-      {output !== undefined && (
-        <div className={`border-2 border-ink shadow-neo p-3 mb-6 ${status === 'succeeded' ? 'bg-lime' : 'bg-white'}`}>
-          <p className="font-black uppercase text-sm mb-2">流程输出（end）</p>
-          <OutputRenderer value={output} blobs={blobs} name={`${flowName}-end`} />
-        </div>
-      )}
 
       <p className="font-black uppercase text-sm mb-2">日志</p>
       <LogPanel logs={logs} />

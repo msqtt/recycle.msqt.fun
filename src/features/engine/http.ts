@@ -24,6 +24,63 @@ export interface HttpCallOptions {
   timedOut?: () => boolean;
 }
 
+export interface DirectHttpSpec {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+  url: string;
+  query?: Record<string, unknown>;
+  headers?: Record<string, unknown>;
+  body?: unknown;
+}
+
+/** v2.2 独立 http 节点：免注册直连，输出 {status, headers, body} */
+export async function callHttpDirect(spec: DirectHttpSpec, opts: HttpCallOptions): Promise<unknown> {
+  const doFetch = opts.fetcher ?? fetch;
+  let url = spec.url;
+  const qs = new URLSearchParams(
+    Object.entries(spec.query ?? {}).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
+  ).toString();
+  if (qs) url += (url.includes('?') ? '&' : '?') + qs;
+
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(spec.headers ?? {})) {
+    headers[k] = String(v).replace(/\{\{secret:([\w-]+)\}\}/g, (_s, name) => opts.getSecret?.(name) ?? '');
+  }
+  const hasBody = spec.body !== undefined && spec.method !== 'GET' && spec.method !== 'DELETE';
+  if (hasBody && !Object.keys(headers).some((h) => h.toLowerCase() === 'content-type')) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  let res: Response;
+  try {
+    res = await doFetch(url, {
+      method: spec.method,
+      headers,
+      body: hasBody ? (typeof spec.body === 'string' ? spec.body : JSON.stringify(spec.body)) : undefined,
+      signal: opts.signal,
+    });
+  } catch (e) {
+    if (opts.signal.aborted) {
+      throw opts.timedOut?.()
+        ? new EngineError('TIMEOUT', `HTTP 请求超时: ${url}`)
+        : new EngineError('CANCELLED', 'HTTP 请求被取消');
+    }
+    throw new EngineError('HTTP_NETWORK', `网络/CORS 失败: ${String(e)}`);
+  }
+  const ct = res.headers.get('content-type') ?? '';
+  let data: unknown;
+  if (ct.includes('application/json')) data = await res.json();
+  else if (ct.startsWith('text/') || ct === '') data = await res.text();
+  else data = await res.blob();
+  if (!res.ok) {
+    throw new EngineError('HTTP_STATUS', `HTTP ${res.status} ${res.statusText}`, { status: res.status, body: data });
+  }
+  return {
+    status: res.status,
+    headers: Object.fromEntries(res.headers.entries()),
+    body: data,
+  };
+}
+
 export async function callHttp(
   tool: ToolRecord,
   endpoint: HttpEndpoint,

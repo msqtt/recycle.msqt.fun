@@ -170,7 +170,8 @@ export const useRunStore = create<RunStore>((set, get) => {
       getTool: (id) => toolMap.get(id),
       getFlow: (id) => flowMap.get(id),
       getSecret: (toolId, name) => secretOverrides?.[`${toolId}.${name}`]
-        ?? secrets.find((s) => s.toolId === toolId && s.name === name)?.value,
+        ?? secrets.find((s) => s.toolId === toolId && s.name === name)?.value
+        ?? secrets.find((s) => s.toolId === '' && s.name === name)?.value,
       env,
       httpConcurrency: settings.httpConcurrency,
       emit,

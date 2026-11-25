@@ -11,7 +11,7 @@ export default defineConfig({
     headers: {
       // dev 专用：Vite 注入内联 react-refresh 脚本需要 unsafe-inline；ajv 运行时编译 schema 需要 unsafe-eval
       'Content-Security-Policy':
-        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; frame-src https: http://localhost:* http://127.0.0.1:*; connect-src https: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'",
+        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; worker-src 'self' blob:; frame-src https: http://localhost:* http://127.0.0.1:*; connect-src https: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'",
       'Referrer-Policy': 'no-referrer',
     },
   },

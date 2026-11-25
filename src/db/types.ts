@@ -93,6 +93,7 @@ export interface AppSettings {
   preserveFailedMs: number;
   retentionRuns: number;
   retentionDays: number;
+  maxFileMB: number;
   env: Record<string, string>;
 }
 
@@ -104,5 +105,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   preserveFailedMs: 120000,
   retentionRuns: 100,
   retentionDays: 30,
+  maxFileMB: 50,
   env: {},
 };

@@ -3,7 +3,8 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db, loadSettings, saveSettings, exportAll, importAll } from '../../db';
 import { DEFAULT_SETTINGS, type AppSettings } from '../../db/types';
 import { refreshHost } from '../../wtop/hostClient';
-import { NeoButton, NeoCard, NeoInput, NeoSelect, PageTitle, Field } from '../../shared/ui';
+import { NeoButton, NeoCard, NeoInput, PageTitle, Field } from '../../shared/ui';
+import { CodeField } from '../../shared/code-field';
 
 const NUM_FIELDS: { key: keyof AppSettings; label: string; hint: string }[] = [
   { key: 'maxConcurrent', label: 'WTOP 最大并发', hint: '超出的调用排队（FIFO）' },
@@ -13,6 +14,7 @@ const NUM_FIELDS: { key: keyof AppSettings; label: string; hint: string }[] = [
   { key: 'preserveFailedMs', label: '失败现场保留 ms', hint: '失败后 iframe 限期保留供查看' },
   { key: 'retentionRuns', label: '历史保留条数', hint: '超出自动清理最旧记录' },
   { key: 'retentionDays', label: '历史保留天数', hint: '超期自动清理' },
+  { key: 'maxFileMB', label: '文件输入上限 MB', hint: 'WTOP 调用输入文件大小限制（输出不限）' },
 ];
 
 export function SettingsPage() {
@@ -22,7 +24,6 @@ export function SettingsPage() {
   const [envErr, setEnvErr] = useState('');
   const tools = useLiveQuery(() => db.tools.toArray(), []) ?? [];
   const secrets = useLiveQuery(() => db.secrets.toArray(), []) ?? [];
-  const [secTool, setSecTool] = useState('');
   const [secName, setSecName] = useState('');
   const [secValue, setSecValue] = useState('');
   const [importErr, setImportErr] = useState('');
@@ -52,8 +53,8 @@ export function SettingsPage() {
   };
 
   const addSecret = async () => {
-    if (!secTool || !secName || !secValue) return;
-    await db.secrets.put({ id: `${secTool}:${secName}`, toolId: secTool, name: secName, value: secValue });
+    if (!secName || !secValue) return;
+    await db.secrets.put({ id: `:${secName}`, toolId: '', name: secName, value: secValue });
     setSecName('');
     setSecValue('');
   };
@@ -96,12 +97,7 @@ export function SettingsPage() {
           ))}
         </div>
         <Field label="环境变量 env（JSON，表达式 context.env.* 可用）" hint={envErr || undefined}>
-          <textarea
-            rows={5}
-            value={envText}
-            onChange={(e) => setEnvText(e.target.value)}
-            className="border-2 border-ink w-full font-mono text-sm p-2"
-          />
+          <CodeField value={envText} language="json" rows={5} error={!!envErr} onChange={setEnvText} />
         </Field>
         <div className="flex items-center gap-3">
           <NeoButton color="bg-lime" onClick={save}>保存设置</NeoButton>
@@ -111,12 +107,8 @@ export function SettingsPage() {
 
       <NeoCard className="mb-6" color="bg-white">
         <h2 className="font-black uppercase mb-2 bg-grape inline-block border-2 border-ink px-2">HTTP 密钥</h2>
-        <p className="text-xs font-mono opacity-60 mb-4">headers 中用 {'{{secret:名称}}'} 引用；明文存于本机 IndexedDB，勿存高敏凭据</p>
+        <p className="text-xs font-mono opacity-60 mb-4">HTTP 节点 headers 中用 {'{{secret:名称}}'} 引用（全局按名称）；明文存于本机 IndexedDB，勿存高敏凭据</p>
         <div className="flex gap-2 mb-4 flex-wrap">
-          <NeoSelect value={secTool} onChange={(e) => setSecTool(e.target.value)}>
-            <option value="">选择 HTTP 工具…</option>
-            {tools.filter((t) => t.type === 'http').map((t) => <option key={t.id} value={t.id}>{t.displayName}</option>)}
-          </NeoSelect>
           <NeoInput placeholder="名称" value={secName} onChange={(e) => setSecName(e.target.value)} className="!w-36" />
           <NeoInput placeholder="值" type="password" value={secValue} onChange={(e) => setSecValue(e.target.value)} className="!w-48" />
           <NeoButton color="bg-lemon" onClick={addSecret}>添加</NeoButton>
@@ -124,8 +116,8 @@ export function SettingsPage() {
         <div className="space-y-2">
           {secrets.map((s) => (
             <div key={s.id} className="flex items-center gap-2 border-2 border-ink px-3 py-1.5 text-sm">
-              <span className="font-bold">{tools.find((t) => t.id === s.toolId)?.displayName ?? s.toolId}</span>
-              <span className="font-mono">{s.name}</span>
+              <span className="font-mono font-bold">{s.name}</span>
+              {s.toolId && <span className="text-xs opacity-60">{tools.find((t) => t.id === s.toolId)?.displayName ?? s.toolId}</span>}
               <span className="font-mono opacity-50">••••••</span>
               <div className="flex-1" />
               <NeoButton color="bg-punch" className="!px-2 !py-0.5 text-xs" onClick={() => void db.secrets.delete(s.id)}>删除</NeoButton>

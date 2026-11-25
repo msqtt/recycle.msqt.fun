@@ -52,7 +52,18 @@ export function OutputRenderer({ value, blobs = [], format = 'auto', title, file
   const blobRec = isBlobRef(value) ? blobs.find((b) => b.id === value.$blob) : undefined;
   const blob: Blob | null = value instanceof Blob ? value : blobRec?.data ?? null;
   const blobName = blob ? ((blob as File).name || blobRec?.name || filename || `${name}.bin`) : null;
-  const text = blob ? null : toText(value);
+  const nestedBlobs = isPlainObject(value)
+    ? Object.entries(value).filter(([, v]) => v instanceof Blob || isBlobRef(v))
+    : [];
+  const displayValue = nestedBlobs.length
+    ? Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+        k,
+        v instanceof Blob || isBlobRef(v)
+          ? { $file: k, size: v instanceof Blob ? v.size : blobs.find((b) => b.id === (v as { $blob: string }).$blob)?.size }
+          : v,
+      ]))
+    : value;
+  const text = blob ? null : toText(displayValue);
   const isTable = format === 'table'
     || (format === 'auto' && Array.isArray(value) && value.length > 0 && value.every(isPlainObject));
 
@@ -94,7 +105,7 @@ export function OutputRenderer({ value, blobs = [], format = 'auto', title, file
   };
 
   return (
-    <div>
+    <div data-blob-card={blob ? '' : undefined}>
       {title && <p className="font-black text-sm mb-1">{title}</p>}
       {blob ? (
         <p className="border-2 border-ink bg-sky/40 px-2 py-1 text-xs font-mono inline-block">
@@ -105,8 +116,15 @@ export function OutputRenderer({ value, blobs = [], format = 'auto', title, file
         <TableView rows={value as Record<string, unknown>[]} />
       ) : (
         <pre className="border-2 border-ink/30 bg-paper px-2 py-1.5 text-xs font-mono whitespace-pre-wrap break-all max-h-80 overflow-auto">
-          {format === 'text' || typeof value === 'string' ? String(value) : JSON.stringify(value, null, 2)}
+          {format === 'text' || typeof value === 'string' ? String(value) : JSON.stringify(displayValue, null, 2)}
         </pre>
+      )}
+      {nestedBlobs.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {nestedBlobs.map(([k, v]) => (
+            <OutputRenderer key={k} value={v} blobs={blobs} name={k} />
+          ))}
+        </div>
       )}
       <div className="flex gap-1.5 mt-1.5">
         <NeoButton color="bg-sky" className="!px-2 !py-0.5 text-xs" onClick={download}>⬇ 下载</NeoButton>

@@ -91,6 +91,7 @@ export function validateGraphDetailed(dsl: DSL, tools: ToolRecord[]): Validation
         }
       }
     }
+    if (n.type === 'http' && !(n.url ?? '').trim()) err(`http 节点 ${n.id} 未配置 url`);
     if (n.type === 'loop' && n.subGraph) {
       const sub = n.subGraph;
       if (hasCycle(sub.nodes, sub.edges)) err(`loop ${n.id} 子图存在环`);

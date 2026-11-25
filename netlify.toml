@@ -16,7 +16,7 @@
   for = "/*"
   [headers.values]
     # unsafe-eval：ajv 运行时编译 JSON Schema 所需；unsafe-inline：Netlify 注入脚本所需
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; frame-src https:; connect-src https:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; worker-src 'self' blob:; frame-src https:; connect-src https:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'"
     Referrer-Policy = "no-referrer"
     X-Content-Type-Options = "nosniff"
 

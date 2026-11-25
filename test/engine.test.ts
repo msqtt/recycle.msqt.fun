@@ -509,3 +509,237 @@ describe('引擎 v2 E16–E25', () => {
     expect(r.status).toBe('cancelled');
   });
 });
+describe('引擎 E26–E31 function 节点', () => {
+  const fnNode = (id: string, code: string, extra: Partial<FlowNode> = {}): FlowNode =>
+    ({ id, type: 'function', code, ...extra });
+
+  const realFnExecutor = {
+    async run(code: string, inputs: unknown, context: unknown, opts: {
+      timeoutMs: number; signal: AbortSignal;
+      onLog(level: 'debug' | 'info' | 'warn' | 'error', message: string): void;
+    }) {
+      const fmt = (a: unknown[]) => a.map((x) => typeof x === 'string' ? x : JSON.stringify(x)).join(' ');
+      const con = {
+        log: (...a: unknown[]) => opts.onLog('info', fmt(a)),
+        warn: (...a: unknown[]) => opts.onLog('warn', fmt(a)),
+        error: (...a: unknown[]) => opts.onLog('error', fmt(a)),
+      };
+      const fn = new Function('inputs', 'context', 'console',
+        '"use strict"; return (async () => {' + code + '\n})();');
+      return fn(inputs, context, con);
+    },
+  };
+
+  it('E26 function happy path：inputMapping 求值 + node:input/output 事件', async () => {
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({ host, jsExecutor: realFnExecutor });
+    const r = await runFlow(dsl(
+      [start(), { id: 'k', type: 'const', value: { n: 7 } },
+        fnNode('fn', 'return { sum: inputs.a + inputs.b };', { inputMapping: { a: '{{context.nodes.k.output.n}}', b: 2 } }),
+        end({ out: '{{context.nodes.fn.output.sum}}' })],
+      [{ from: 'start', to: 'k' }, { from: 'k', to: 'fn' }, { from: 'fn', to: 'end' }],
+    ), {}, d).done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ out: 9 });
+    const inputEv = events.find((e) => e.type === 'node:input' && e.nodeId === 'fn');
+    expect(inputEv && inputEv.type === 'node:input' && inputEv.params).toEqual({ a: 7, b: 2 });
+    const outEv = events.find((e) => e.type === 'node:output' && e.nodeId === 'fn');
+    expect(outEv && outEv.type === 'node:output' && outEv.output).toEqual({ sum: 9 });
+  });
+
+  it('E27 console 捕获 → node:log 事件（归属 nodeId）', async () => {
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({ host, jsExecutor: realFnExecutor });
+    const r = await runFlow(dsl(
+      [start(), fnNode('fn', 'console.log("hi", 1); console.warn("careful"); return 1;'), end({})],
+      [{ from: 'start', to: 'fn' }, { from: 'fn', to: 'end' }],
+    ), {}, d).done;
+    expect(r.status).toBe('succeeded');
+    const logs = events.filter((e) => e.type === 'node:log' && e.nodeId === 'fn');
+    expect(logs.some((e) => e.type === 'node:log' && e.level === 'info' && e.message === 'hi 1')).toBe(true);
+    expect(logs.some((e) => e.type === 'node:log' && e.level === 'warn' && e.message === 'careful')).toBe(true);
+  });
+
+  it('E28 代码抛错 → BUSINESS_ERROR；retry 后成功', async () => {
+    const { host } = mockHost({});
+    let calls = 0;
+    const flaky = {
+      run: async () => {
+        calls++;
+        if (calls === 1) throw new Error('boom');
+        return { ok: true };
+      },
+    };
+    const { deps: d, events } = deps({ host, jsExecutor: flaky });
+    const r = await runFlow(dsl(
+      [start(), fnNode('fn', 'return 1;', { retry: { max: 1 } }), end({ out: '{{context.nodes.fn.output.ok}}' })],
+      [{ from: 'start', to: 'fn' }, { from: 'fn', to: 'end' }],
+    ), {}, d).done;
+    expect(r.status).toBe('succeeded');
+    expect(calls).toBe(2);
+    expect(r.output).toEqual({ out: true });
+    expect(events.some((e) => e.type === 'node:log' && (e.level === 'warn' || e.level === 'error'))).toBe(true);
+  });
+
+  it('E29 执行器超时错误透传 → TIMEOUT', async () => {
+    const { host } = mockHost({});
+    const timeoutExec = { run: async () => { throw new WtopError('TIMEOUT', '函数执行超时（30ms）'); } };
+    const { deps: d } = deps({ host, jsExecutor: timeoutExec });
+    const r = await runFlow(dsl(
+      [start(), fnNode('fn', 'return 1;', { timeoutMs: 30 }), end({})],
+      [{ from: 'start', to: 'fn' }, { from: 'fn', to: 'end' }],
+    ), {}, d).done;
+    expect(r.status).toBe('failed');
+    expect(r.error?.code).toBe('TIMEOUT');
+    expect(r.error?.nodeId).toBe('fn');
+  });
+
+  it('E30 运行取消 → 执行器 signal 中止 → CANCELLED', async () => {
+    const { host } = mockHost({});
+    const hangExec = {
+      run: (_c: string, _i: unknown, _ctx: unknown, opts: { signal: AbortSignal }) =>
+        new Promise((_res, rej) => {
+          opts.signal.addEventListener('abort', () => rej(new WtopError('CANCELLED', '运行被取消')), { once: true });
+        }),
+    };
+    const { deps: d } = deps({ host, jsExecutor: hangExec });
+    const handle = runFlow(dsl(
+      [start(), fnNode('fn', 'return 1;'), end({})],
+      [{ from: 'start', to: 'fn' }, { from: 'fn', to: 'end' }],
+    ), {}, d);
+    await new Promise((r) => setTimeout(r, 20));
+    handle.cancel();
+    const r = await handle.done;
+    expect(r.status).toBe('cancelled');
+  });
+
+  it('E31 DSL_SCHEMA：function 需 code；context 快照传入', async () => {
+    const { validateDslSchema } = await import('../src/features/engine/validate');
+    const ok = dsl([start(), fnNode('fn', 'return context.start.input.x;'), end({})],
+      [{ from: 'start', to: 'fn' }, { from: 'fn', to: 'end' }]);
+    expect(validateDslSchema(ok)).toEqual([]);
+    const bad = dsl([start(), { id: 'fn', type: 'function' } as FlowNode, end({})],
+      [{ from: 'start', to: 'fn' }, { from: 'fn', to: 'end' }]);
+    expect(validateDslSchema(bad).length).toBeGreaterThan(0);
+
+    const { host } = mockHost({});
+    const { deps: d } = deps({ host, jsExecutor: realFnExecutor });
+    const r = await runFlow(dsl(
+      [start({ x: { type: 'number' } }), fnNode('fn', 'return context.start.input.x * 2;'), end({ out: '{{context.nodes.fn.output}}' })],
+      [{ from: 'start', to: 'fn' }, { from: 'fn', to: 'end' }],
+    ), { x: 21 }, d).done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ out: 42 });
+  });
+});
+
+describe('引擎 v2.2 E32–E37 http 节点 / 运行到此 / 迁移', () => {
+  const httpNode = (extra: Partial<FlowNode> = {}): FlowNode =>
+    ({ id: 'h', type: 'http', method: 'GET', url: 'https://api.test/items', ...extra });
+
+  it('E32 http 免注册直连：url 插值 + query + secret header + 输出 {status,headers,body}', async () => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      seen.push({ url, init });
+      return new Response(JSON.stringify({ hello: 1 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({
+      host, fetcher,
+      getSecret: (toolId, name) => (toolId === '' && name === 'tok' ? 'S3CRET' : undefined),
+    });
+    const flow = dsl(
+      [start({ id: { type: 'string' } }),
+        httpNode({
+          url: 'https://api.test/items/{{context.start.input.id}}',
+          query: { page: '2' },
+          headers: { Authorization: 'Bearer {{secret:tok}}' },
+        }),
+        end({ body: '{{context.nodes.h.output.body}}' })],
+      [{ from: 'start', to: 'h' }, { from: 'h', to: 'end' }],
+    );
+    const r = await runFlow(flow, { id: 'abc' }, d).done;
+    expect(r.status).toBe('succeeded');
+    expect(seen[0].url).toBe('https://api.test/items/abc?page=2');
+    expect((seen[0].init!.headers as Record<string, string>).Authorization).toBe('Bearer S3CRET');
+    expect(r.output).toEqual({ body: { hello: 1 } });
+    const out = events.find((e) => e.type === 'node:output' && e.nodeId === 'h') as Extract<EngineEvent, { type: 'node:output' }>;
+    expect((out.output as { status: number }).status).toBe(200);
+  });
+
+  it('E33 http 非 2xx → HTTP_STATUS', async () => {
+    const fetcher = (async () => new Response('nope', { status: 404, statusText: 'Not Found' })) as typeof fetch;
+    const { host } = mockHost({});
+    const { deps: d } = deps({ host, fetcher });
+    const flow = dsl([start(), httpNode(), end({})], [{ from: 'start', to: 'h' }, { from: 'h', to: 'end' }]);
+    const r = await runFlow(flow, {}, d).done;
+    expect(r.status).toBe('failed');
+    expect(r.error?.code).toBe('HTTP_STATUS');
+  });
+
+  it('E34 http 超时 → TIMEOUT（与取消区分）', async () => {
+    const fetcher = ((_url: string, init?: RequestInit) => new Promise((_res, rej) => {
+      init!.signal!.addEventListener('abort', () => rej(new Error('aborted')));
+    })) as typeof fetch;
+    const { host } = mockHost({});
+    const { deps: d } = deps({ host, fetcher });
+    const flow = dsl([start(), httpNode({ timeoutMs: 30 }), end({})], [{ from: 'start', to: 'h' }, { from: 'h', to: 'end' }]);
+    const r = await runFlow(flow, {}, d).done;
+    expect(r.status).toBe('failed');
+    expect(r.error?.code).toBe('TIMEOUT');
+  });
+
+  it('E35 stopAfterNodeId：目标完成后下游 skipped，run succeeded', async () => {
+    const { host } = mockHost({});
+    const { deps: d, events } = deps({ host });
+    const flow = dsl(
+      [start(), t('a', '1+1'), t('b', '2+2'), end({ v: '{{context.nodes.b.output}}' })],
+      [{ from: 'start', to: 'a' }, { from: 'a', to: 'b' }, { from: 'b', to: 'end' }],
+    );
+    const r = await runFlow(flow, {}, d, { stopAfterNodeId: 'a' }).done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toBeUndefined();
+    expect(lastState(events, 'a')?.state.status).toBe('succeeded');
+    expect(lastState(events, 'b')?.state.status).toBe('skipped');
+    expect(lastState(events, 'end')?.state.status).toBe('skipped');
+  });
+
+  it('E36 migrateDsl：call-http → http（path 占位 / GET query / POST body / 缺工具保留）', async () => {
+    const { migrateDsl } = await import('../src/features/engine/dsl');
+    const tools = [httpTool('httpapi', [
+      { name: 'get', displayName: 'get', method: 'GET', path: '/items/{{id}}', input: { type: 'object', properties: {} }, output: { type: 'object' }, headers: { 'X-Key': '{{secret:k}}' } },
+      { name: 'create', displayName: 'create', method: 'POST', path: '/items', input: { type: 'object', properties: {} }, output: { type: 'object' } },
+    ])];
+    const flow = dsl([
+      start(),
+      { id: 'g', type: 'call-http', toolId: 'httpapi', endpoint: 'get', inputMapping: { id: '{{context.start.input.id}}', page: '1' } },
+      { id: 'c', type: 'call-http', toolId: 'httpapi', endpoint: 'create', inputMapping: { name: 'x' } },
+      { id: 'm', type: 'call-http', toolId: 'missing', endpoint: 'x', inputMapping: {} },
+      end({}),
+    ], []);
+    const out = migrateDsl(flow, tools);
+    const g = out.nodes.find((n) => n.id === 'g')!;
+    expect(g.type).toBe('http');
+    expect(g.url).toBe('https://api.test/items/{{context.start.input.id}}');
+    expect(g.query).toEqual({ page: '1' });
+    expect(g.headers).toEqual({ 'X-Key': '{{secret:k}}' });
+    const c = out.nodes.find((n) => n.id === 'c')!;
+    expect(c.type).toBe('http');
+    expect(c.method).toBe('POST');
+    expect(c.body).toEqual({ name: 'x' });
+    expect(out.nodes.find((n) => n.id === 'm')!.type).toBe('call-http');
+  });
+
+  it('E37 http schema：缺 url 报错；stopAfter 不影响正常全量运行', async () => {
+    const { validateFlowDetailed } = await import('../src/features/engine/validate');
+    const bad = dsl([start(), { id: 'h', type: 'http' } as FlowNode, end({})], []);
+    expect(validateFlowDetailed(bad, []).some((i) => i.level === 'error')).toBe(true);
+    const { host } = mockHost({});
+    const { deps: d } = deps({ host });
+    const flow = dsl([start(), t('a', '40+2'), end({ v: '{{context.nodes.a.output}}' })],
+      [{ from: 'start', to: 'a' }, { from: 'a', to: 'end' }]);
+    const r = await runFlow(flow, {}, d, {}).done;
+    expect(r.status).toBe('succeeded');
+    expect(r.output).toEqual({ v: 42 });
+  });
+});

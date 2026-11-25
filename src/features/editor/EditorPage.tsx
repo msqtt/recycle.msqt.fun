@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   ReactFlow, Background, Controls, MiniMap, Handle, Position,
   applyNodeChanges, BaseEdge, EdgeLabelRenderer, getSmoothStepPath,
@@ -9,27 +9,41 @@ import '@xyflow/react/dist/style.css';
 import dagre from '@dagrejs/dagre';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../../db';
-import type { FlowRecord, ToolRecord } from '../../db/types';
+import type { FlowRecord, ToolRecord, NodeState } from '../../db/types';
 import type { DSL, FlowNode, NodeType, FlowEdge } from '../engine/dsl';
+import { migrateDsl } from '../engine/dsl';
 import { validateFlowDetailed, type ValidationIssue } from '../engine/validate';
 import { NeoButton, NeoBadge, NeoModal, NeoInput, Field } from '../../shared/ui';
 import { SchemaForm, schemaDefaults } from '../../shared/schema-form';
 import { ConfigPanel, useBindingOptions } from './ConfigPanel';
 import { useRunStore } from '../../shared/run-store';
+import { OutputRenderer } from '../../shared/output-view';
+import { LogPanel, InputModal, ViewDrawer } from '../../shared/run-widgets';
+import { CodeField } from '../../shared/code-field';
 import { buildBundle, isBundle, downloadJson, type FlowBundle } from '../bundle';
 
 const NODE_COLORS: Record<NodeType, string> = {
-  start: '#B8F53D', end: '#B8F53D', 'call-wtop': '#7DD3FC', 'call-http': '#C4B5FD',
+  start: '#B8F53D', end: '#B8F53D', 'call-wtop': '#7DD3FC', 'call-http': '#C4B5FD', http: '#C4B5FD',
   transform: '#FFDE59', condition: '#FFA94D', switch: '#FFA94D', loop: '#FFDE59',
   parallel: '#FFDE59', merge: '#FFDE59', approval: '#FF6B9D', subflow: '#7DD3FC',
-  const: '#FFDE59', input: '#FF6B9D', output: '#B8F53D',
+  const: '#FFDE59', input: '#FF6B9D', output: '#B8F53D', function: '#C4B5FD',
 };
 
 const NODE_LABELS: Record<NodeType, string> = {
-  start: '开始', end: '结束', 'call-wtop': 'WTOP 调用', 'call-http': 'HTTP 调用',
+  start: '开始', end: '结束', 'call-wtop': 'WTOP 调用', 'call-http': 'HTTP 调用(旧)', http: 'HTTP',
   transform: '转换', condition: '条件', switch: '分支', loop: '循环',
   parallel: '并行', merge: '汇聚', approval: '人工确认', subflow: '子流程',
-  const: '常量', input: '输入', output: '输出',
+  const: '常量', input: '输入', output: '输出', function: '函数',
+};
+
+const STATE_LABEL: Record<string, string> = {
+  pending: '待执行', running: '运行中', 'waiting-human': '等待人工', succeeded: '✓', failed: '✗', skipped: '跳过', cancelled: '取消',
+};
+const STATE_BADGE: Record<string, string> = {
+  running: 'bg-sky', 'waiting-human': 'bg-lemon', succeeded: 'bg-lime', failed: 'bg-punch', skipped: 'bg-white opacity-60', cancelled: 'bg-white opacity-60',
+};
+const RUN_STATUS_LABEL: Record<string, string> = {
+  running: '运行中', 'paused-human': '等待人工', 'paused-step': '暂停', succeeded: '成功', failed: '失败', cancelled: '已取消',
 };
 
 function summarize(v: unknown): string {
@@ -39,15 +53,24 @@ function summarize(v: unknown): string {
 
 function NeoFlowNode({ data, selected }: NodeProps) {
   const n = data.node as FlowNode;
-  const breakpoint = data.breakpoint as boolean;
+  const st = data.runState as NodeState | undefined;
   const outputSummary = data.outputSummary as string | undefined;
   return (
     <div
       className="border-2 border-ink px-3 py-2 min-w-[130px] font-bold text-sm relative"
-      style={{ background: NODE_COLORS[n.type], boxShadow: selected ? '6px 6px 0 #111' : '3px 3px 0 #111' }}
+      style={{
+        background: NODE_COLORS[n.type],
+        boxShadow: selected ? '6px 6px 0 #111' : '3px 3px 0 #111',
+        opacity: st?.status === 'skipped' ? 0.55 : 1,
+      }}
     >
-      {breakpoint && (
-        <span title="断点" className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 rounded-full bg-punch border-2 border-ink" />
+      {st && st.status !== 'pending' && (
+        <span
+          data-node-status={st.status}
+          className={`absolute -top-2.5 -left-2 border-2 border-ink px-1 text-[10px] font-black ${STATE_BADGE[st.status] ?? 'bg-white'}`}
+        >
+          {STATE_LABEL[st.status] ?? st.status}{st.status === 'running' && st.percent !== undefined ? ` ${Math.round(st.percent)}%` : ''}
+        </span>
       )}
       {outputSummary !== undefined && (
         <span title={`最近输出: ${outputSummary}`} className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full bg-lime border-2 border-ink" />
@@ -55,9 +78,24 @@ function NeoFlowNode({ data, selected }: NodeProps) {
       <Handle type="target" position={Position.Left} className="!bg-ink !w-3 !h-3 !border-2 !border-ink" />
       <div className="text-[10px] uppercase opacity-70">{n.type} · {NODE_LABELS[n.type]}</div>
       <div className="font-mono">{n.id}</div>
-      {n.method && <div className="text-xs font-mono">.{n.method}</div>}
-      {n.endpoint && <div className="text-xs font-mono">:{n.endpoint}</div>}
+      {n.type === 'call-wtop' && n.method && <div className="text-xs font-mono">.{n.method}</div>}
+      {n.type === 'http' && <div className="text-xs font-mono">{n.method ?? 'GET'} {String(n.url ?? '').slice(0, 24)}</div>}
       {n.type === 'output' && n.title && <div className="text-xs">{n.title}</div>}
+      {st?.error && (
+        <div className="text-[10px] font-mono mt-1 bg-punch/30 border border-punch px-1 truncate max-w-[180px]" title={st.error.message}>
+          [{st.error.code}]
+        </div>
+      )}
+      {n.type !== 'start' && (
+        <button
+          type="button"
+          title="运行到此节点（下游跳过）"
+          className="absolute -bottom-2.5 right-1 border-2 border-ink bg-lemon px-1 text-[10px] font-black leading-tight shadow-neo-sm hover:shadow-none hover:bg-lime"
+          onClick={(e) => { e.stopPropagation(); (data.onRunTo as (() => void) | undefined)?.(); }}
+        >
+          ▶ 到此
+        </button>
+      )}
       <Handle type="source" position={Position.Right} className="!bg-ink !w-3 !h-3 !border-2 !border-ink" />
     </div>
   );
@@ -98,8 +136,8 @@ const edgeTypes = { neo: NeoEdge };
 
 const PALETTE_GROUPS: { group: string; items: NodeType[] }[] = [
   { group: '数据', items: ['const', 'input', 'output'] },
-  { group: '调用', items: ['call-wtop', 'call-http', 'subflow'] },
-  { group: '控制', items: ['transform', 'condition', 'switch', 'loop', 'parallel', 'merge', 'approval'] },
+  { group: '调用', items: ['call-wtop', 'http', 'subflow'] },
+  { group: '控制', items: ['transform', 'function', 'condition', 'switch', 'loop', 'parallel', 'merge', 'approval'] },
 ];
 
 function nodeDefaults(type: NodeType, id: string): FlowNode {
@@ -108,7 +146,7 @@ function nodeDefaults(type: NodeType, id: string): FlowNode {
     case 'start': return { ...base, inputSchema: { type: 'object', properties: {} } };
     case 'end': return { ...base, outputMapping: {} };
     case 'call-wtop': return { ...base, inputMapping: {} };
-    case 'call-http': return { ...base, inputMapping: {} };
+    case 'http': return { ...base, method: 'GET', url: '' };
     case 'transform': case 'condition': return { ...base, expression: '' };
     case 'switch': return { ...base, cases: [] };
     case 'loop': return { ...base, itemsExpression: '', subGraph: { nodes: [], edges: [] } };
@@ -120,6 +158,7 @@ function nodeDefaults(type: NodeType, id: string): FlowNode {
       inputSchema: { type: 'object', properties: { text: { type: 'string', title: '文本' } }, required: ['text'] },
     };
     case 'output': return { ...base, value: '', format: 'auto' };
+    case 'function': return { ...base, code: '// inputs 为输入映射结果对象，context 为运行上下文快照\nreturn inputs;', inputMapping: {}, timeoutMs: 30000 };
     default: return base;
   }
 }
@@ -145,15 +184,27 @@ function nextBranch(d: DSL, sourceId: string): string | undefined {
   return undefined;
 }
 
+function usePanelOpen(key: 'left' | 'right'): [boolean, (v: boolean) => void] {
+  const storageKey = `recycle.editor.${key}`;
+  const [open, setOpen] = useState(() => localStorage.getItem(storageKey) !== '0');
+  const set = (v: boolean) => { setOpen(v); localStorage.setItem(storageKey, v ? '1' : '0'); };
+  return [open, set];
+}
+
 export function EditorPage() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const record = useLiveQuery(() => (id ? db.flows.get(id) : undefined), [id]);
-  const tools = useLiveQuery(() => db.tools.toArray(), []) ?? [];
+  const toolsQuery = useLiveQuery(() => db.tools.toArray(), []);
+  const tools = toolsQuery ?? [];
   const flows = useLiveQuery(() => db.flows.toArray(), []) ?? [];
-  const startRun = useRunStore((s) => s.start);
-  const liveFlowId = useRunStore((s) => s.flowId);
-  const nodeIO = useRunStore((s) => s.nodeIO);
+  const settingsRec = useLiveQuery(() => db.settings.get('app'), []);
+  const envKeys = useMemo(
+    () => Object.keys(((settingsRec?.value as { env?: Record<string, string> } | undefined)?.env) ?? {}),
+    [settingsRec],
+  );
+  const store = useRunStore();
+  const liveRun = !!store.runId && store.flowId === id;
 
   const [dsl, setDsl] = useState<DSL | null>(null);
   const [name, setName] = useState('');
@@ -161,17 +212,23 @@ export function EditorPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [issues, setIssues] = useState<ValidationIssue[] | null>(null);
   const [runOpen, setRunOpen] = useState(false);
+  const [stopTarget, setStopTarget] = useState<string | null>(null);
   const [runInput, setRunInput] = useState<Record<string, unknown>>({});
   const [measured, setMeasured] = useState<Record<string, { width: number; height: number }>>({});
-  const [breakpoints, setBreakpoints] = useState<Set<string>>(new Set());
   const [insertEdge, setInsertEdge] = useState<FlowEdge | null>(null);
+  const [leftOpen, setLeftOpen] = usePanelOpen('left');
+  const [rightOpen, setRightOpen] = usePanelOpen('right');
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [viewCallId, setViewCallId] = useState<string | null>(null);
+  const [inputHidden, setInputHidden] = useState(false);
+  useEffect(() => { setInputHidden(false); }, [store.inputRequest?.nodeId]);
 
   useEffect(() => {
-    if (record && !dsl) {
-      setDsl(record.dsl);
+    if (record && !dsl && toolsQuery) {
+      setDsl(migrateDsl(record.dsl, toolsQuery));
       setName(record.name);
     }
-  }, [record, dsl]);
+  }, [record, dsl, toolsQuery]);
 
   const patch = useCallback((fn: (d: DSL) => DSL) => {
     setDsl((d) => (d ? fn(d) : d));
@@ -179,13 +236,11 @@ export function EditorPage() {
     setIssues(null);
   }, []);
 
-  const toggleBreakpoint = useCallback((nid: string) => {
-    setBreakpoints((s) => {
-      const next = new Set(s);
-      if (next.has(nid)) next.delete(nid); else next.add(nid);
-      return next;
-    });
-  }, []);
+  const openRunTo = useCallback((nid: string | null) => {
+    setStopTarget(nid);
+    setRunInput(schemaDefaults(dsl?.nodes.find((n) => n.type === 'start')?.inputSchema ?? {}));
+    setRunOpen(true);
+  }, [dsl]);
 
   const rfNodes: Node[] = useMemo(() => (dsl?.nodes ?? []).map((n, i) => ({
     id: n.id,
@@ -193,13 +248,14 @@ export function EditorPage() {
     position: { x: n.x ?? 80 + (i % 4) * 220, y: n.y ?? 60 + Math.floor(i / 4) * 140 },
     data: {
       node: n,
-      breakpoint: breakpoints.has(n.id),
-      outputSummary: liveFlowId === id && nodeIO[n.id]?.output !== undefined
-        ? summarize(nodeIO[n.id].output) : undefined,
+      runState: liveRun ? store.nodeStates[n.id] : undefined,
+      outputSummary: liveRun && store.nodeIO[n.id]?.output !== undefined
+        ? summarize(store.nodeIO[n.id].output) : undefined,
+      onRunTo: () => openRunTo(n.id),
     },
     selected: n.id === selectedId,
     measured: measured[n.id],
-  })), [dsl, selectedId, measured, breakpoints, nodeIO, liveFlowId, id]);
+  })), [dsl, selectedId, measured, store.nodeStates, store.nodeIO, liveRun, openRunTo]);
 
   const rfEdges: Edge[] = useMemo(() => (dsl?.edges ?? []).map((e, i) => ({
     id: `e${i}_${e.from}_${e.to}`,
@@ -270,6 +326,7 @@ export function EditorPage() {
       return { ...d, nodes: [...d.nodes, n], edges };
     });
     setSelectedId(nid);
+    setRightOpen(true);
   };
 
   /** 连线 ＋：A→B 变 A→新→B，原 branch 保留在 A→新（分支语义不变） */
@@ -290,6 +347,7 @@ export function EditorPage() {
     });
     setInsertEdge(null);
     setSelectedId(nid);
+    setRightOpen(true);
   };
 
   const duplicateSelected = useCallback(() => {
@@ -308,7 +366,7 @@ export function EditorPage() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
         const t = e.target as HTMLElement;
-        if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
+        if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.closest('.cm-editor')) return;
         e.preventDefault();
         duplicateSelected();
       }
@@ -339,7 +397,7 @@ export function EditorPage() {
   };
 
   const selectedNode = dsl?.nodes.find((n) => n.id === selectedId) ?? null;
-  const bindingOptions = useBindingOptions(dsl ?? { id: '', name: '', version: 1, nodes: [], edges: [] }, selectedId ?? '', tools as ToolRecord[]);
+  const bindingOptions = useBindingOptions(dsl ?? { id: '', name: '', version: 1, nodes: [], edges: [] }, selectedId ?? '', tools as ToolRecord[], envKeys);
 
   const save = async (): Promise<FlowRecord | null> => {
     if (!dsl || !record) return null;
@@ -359,57 +417,84 @@ export function EditorPage() {
     const saved = await save();
     if (!saved) return;
     if (validateFlowDetailed(saved.dsl, tools).some((i) => i.level === 'error')) return;
-    const startNode = saved.dsl.nodes.find((n) => n.type === 'start');
-    setRunInput(schemaDefaults(startNode?.inputSchema ?? {}));
-    setRunOpen(true);
+    openRunTo(null);
   };
 
-  const doRun = async (mode: 'run' | 'step') => {
+  const doRun = async () => {
     if (!record || !dsl) return;
+    const found = validateFlowDetailed({ ...dsl, name }, tools);
+    if (found.some((i) => i.level === 'error')) { setIssues(found); setRunOpen(false); return; }
     const saved: FlowRecord = { ...record, name, dsl: { ...dsl, name } };
     setRunOpen(false);
-    const runId = await startRun(saved, runInput, { mode, breakpoints: [...breakpoints] });
-    nav(`/run/${runId}`);
+    setLogsOpen(true);
+    await store.start(saved, runInput, { mode: 'run', stopAfterNodeId: stopTarget ?? undefined });
   };
 
   if (!record || !dsl) return <p className="font-mono p-6">加载中…</p>;
 
   const errorCount = issues?.filter((i) => i.level === 'error').length ?? 0;
   const warnCount = issues?.filter((i) => i.level === 'warn').length ?? 0;
+  const runActive = liveRun && ['running', 'paused-human', 'paused-step'].includes(store.status ?? '');
+  const selectedState = liveRun && selectedId ? store.nodeStates[selectedId] : undefined;
+  const selectedIO = liveRun && selectedId ? store.nodeIO[selectedId] : undefined;
+  const waitingApprovals = liveRun
+    ? Object.entries(store.nodeStates).filter(([nid, st]) =>
+        st.status === 'waiting-human' && dsl.nodes.find((n) => n.id === nid)?.type === 'approval')
+    : [];
 
   return (
     <div className="flex flex-col h-[calc(100vh-64px)]">
       <div className="flex items-center gap-3 px-4 py-2 border-b-2 border-ink bg-paper flex-wrap">
         <NeoInput value={name} onChange={(e) => { setName(e.target.value); setDirty(true); }} className="!w-56 font-bold" />
         <NeoBadge tone="ok">v{record.version}{dirty ? ' *' : ''}</NeoBadge>
+        {liveRun && store.status && (
+          <span data-run-status={store.status}>
+            <NeoBadge tone={store.status}>{RUN_STATUS_LABEL[store.status] ?? store.status}</NeoBadge>
+          </span>
+        )}
+        {liveRun && stopTarget && <NeoBadge tone="ok">到 {stopTarget} 为止</NeoBadge>}
         <div className="flex-1" />
+        {runActive && <NeoButton color="bg-punch" onClick={() => store.cancel()}>■ 取消</NeoButton>}
+        {liveRun && (
+          <>
+            <NeoButton color="bg-white" onClick={() => setLogsOpen(!logsOpen)}>{logsOpen ? '隐藏日志' : '日志'}</NeoButton>
+            <Link to={`/run/${store.runId}`} className="font-bold text-xs underline">详情</Link>
+          </>
+        )}
         <NeoButton color="bg-white" onClick={autoLayout}>整理布局</NeoButton>
         <NeoButton color="bg-white" onClick={() => nav('/flows')}>← 返回</NeoButton>
         <NeoButton color="bg-sky" onClick={save}>保存</NeoButton>
-        <NeoButton color="bg-lime" onClick={openRun}>▶ 运行</NeoButton>
+        <NeoButton color="bg-lime" onClick={openRun} disabled={runActive}>▶ 运行</NeoButton>
       </div>
 
       <div className="flex flex-1 min-h-0">
-        <div className="w-40 border-r-2 border-ink bg-paper p-2 overflow-auto shrink-0">
-          {PALETTE_GROUPS.map((g) => (
-            <div key={g.group} className="mb-3">
-              <p className="text-xs font-black uppercase mb-1.5">{g.group}</p>
-              {g.items.map((type) => (
-                <button
-                  key={type}
-                  onClick={() => addNode(type)}
-                  className="block w-full text-left border-2 border-ink px-2 py-1 mb-1.5 text-xs font-bold shadow-neo-sm hover:shadow-none"
-                  style={{ background: NODE_COLORS[type] }}
-                >
-                  + {NODE_LABELS[type]}
-                </button>
-              ))}
-            </div>
-          ))}
-          <p className="text-[10px] mt-3 opacity-60 leading-relaxed">
-            选中节点后添加会自动接在其后；点连线上的 ＋ 插入节点；Ctrl/Cmd+D 复制；右键节点切换断点；Delete 删除。
-          </p>
-        </div>
+        {leftOpen ? (
+          <div className="w-40 border-r-2 border-ink bg-paper p-2 overflow-auto shrink-0">
+            <button type="button" title="收起节点面板" onClick={() => setLeftOpen(false)}
+              className="block w-full border-2 border-ink bg-white text-xs font-black mb-2 hover:bg-lemon">◀ 收起</button>
+            {PALETTE_GROUPS.map((g) => (
+              <div key={g.group} className="mb-3">
+                <p className="text-xs font-black uppercase mb-1.5">{g.group}</p>
+                {g.items.map((type) => (
+                  <button
+                    key={type}
+                    onClick={() => addNode(type)}
+                    className="block w-full text-left border-2 border-ink px-2 py-1 mb-1.5 text-xs font-bold shadow-neo-sm hover:shadow-none"
+                    style={{ background: NODE_COLORS[type] }}
+                  >
+                    + {NODE_LABELS[type]}
+                  </button>
+                ))}
+              </div>
+            ))}
+            <p className="text-[10px] mt-3 opacity-60 leading-relaxed">
+              选中节点后添加会自动接在其后；点连线上的 ＋ 插入节点；Ctrl/Cmd+D 复制；节点上的「▶ 到此」运行到该节点为止；Delete 删除。
+            </p>
+          </div>
+        ) : (
+          <button type="button" title="展开节点面板" onClick={() => setLeftOpen(true)}
+            className="w-7 border-r-2 border-ink bg-paper text-xs font-black shrink-0 hover:bg-lemon">▶</button>
+        )}
 
         <div className="flex-1 relative">
           <ReactFlow
@@ -423,8 +508,8 @@ export function EditorPage() {
               ...d,
               edges: d.edges.filter((e) => !es.some((x) => x.source === e.from && x.target === e.to)),
             }))}
-            onNodeClick={(_, n) => setSelectedId(n.id)}
-            onNodeContextMenu={(e, n) => { e.preventDefault(); toggleBreakpoint(n.id); }}
+            onNodeClick={(_, n) => { setSelectedId(n.id); setRightOpen(true); }}
+            onNodeContextMenu={(e, n) => { e.preventDefault(); void openRunTo(n.id); }}
             onPaneClick={() => setSelectedId(null)}
             fitView
             deleteKeyCode={['Delete', 'Backspace']}
@@ -436,6 +521,19 @@ export function EditorPage() {
           {dsl.nodes.length <= 2 && dsl.edges.length === 0 && (
             <div className="absolute top-3 left-1/2 -translate-x-1/2 border-2 border-ink bg-lemon shadow-neo px-3 py-2 text-xs font-bold pointer-events-none">
               从左侧添加节点，拖圆点连线；选中节点后添加会自动接在其后
+            </div>
+          )}
+          {waitingApprovals.length > 0 && (
+            <div className="absolute top-3 right-3 border-2 border-ink bg-lemon shadow-neo p-3 space-y-2 max-w-xs">
+              {waitingApprovals.map(([nid]) => (
+                <div key={nid} className="text-xs">
+                  <p className="font-bold mb-1">{dsl.nodes.find((n) => n.id === nid)?.prompt ?? '确认继续？'}（{nid}）</p>
+                  <div className="flex gap-2">
+                    <NeoButton color="bg-lime" className="!px-2 !py-0.5 text-xs" onClick={() => store.resolveApproval(nid, true)}>批准</NeoButton>
+                    <NeoButton color="bg-punch" className="!px-2 !py-0.5 text-xs" onClick={() => store.resolveApproval(nid, false)}>拒绝</NeoButton>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
           {issues !== null && (
@@ -455,28 +553,74 @@ export function EditorPage() {
                   </>}
             </div>
           )}
-        </div>
-
-        <div className="w-[360px] border-l-2 border-ink bg-paper p-3 overflow-auto shrink-0">
-          {selectedNode ? (
-            <ConfigPanel
-              key={selectedNode.id}
-              node={selectedNode}
-              dsl={dsl}
-              tools={tools}
-              flows={flows}
-              bindingOptions={bindingOptions}
-              breakpoint={breakpoints.has(selectedNode.id)}
-              onToggleBreakpoint={() => toggleBreakpoint(selectedNode.id)}
-              onChange={(p) => patch((d) => ({
-                ...d,
-                nodes: d.nodes.map((n) => (n.id === selectedNode.id ? { ...n, ...p } : n)),
-              }))}
-            />
-          ) : (
-            <p className="text-sm font-mono opacity-60">点击画布节点进行配置</p>
+          {logsOpen && liveRun && (
+            <div className="absolute bottom-3 right-3 w-[420px] max-w-[60%] shadow-neo">
+              <LogPanel logs={store.logs} className="h-40" />
+            </div>
           )}
         </div>
+
+        {rightOpen ? (
+          <div className="w-[380px] border-l-2 border-ink bg-paper p-3 overflow-auto shrink-0">
+            <button type="button" title="收起配置面板" onClick={() => setRightOpen(false)}
+              className="block w-full border-2 border-ink bg-white text-xs font-black mb-2 hover:bg-lemon">收起 ▶</button>
+            {selectedNode ? (
+              <>
+                {liveRun && (selectedIO?.output !== undefined || selectedIO?.input !== undefined) && (
+                  <div className="border-2 border-ink bg-white p-2 mb-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="text-xs font-black uppercase">本次运行 I/O</p>
+                      <div className="flex-1" />
+                      {selectedState?.callId && ['running', 'waiting-human', 'failed'].includes(selectedState.status) && (
+                        <NeoButton color="bg-sky" className="!px-2 !py-0.5 text-xs" onClick={() => setViewCallId(selectedState.callId!)}>查看现场</NeoButton>
+                      )}
+                    </div>
+                    {selectedIO?.input !== undefined && (
+                      <details className="mb-1">
+                        <summary className="text-xs font-bold cursor-pointer opacity-70">输入</summary>
+                        <OutputRenderer value={selectedIO.input} name={`${selectedNode.id}-input`} />
+                      </details>
+                    )}
+                    {selectedIO?.output !== undefined && (
+                      selectedNode.type === 'end' || selectedNode.type === 'output' ? (
+                        <OutputRenderer
+                          value={selectedIO.output}
+                          format={selectedNode.format}
+                          title={selectedNode.type === 'end' ? '流程输出' : selectedNode.title}
+                          filename={selectedNode.filename} mime={selectedNode.mime}
+                          name={selectedNode.id}
+                        />
+                      ) : (
+                        <details open>
+                          <summary className="text-xs font-bold cursor-pointer opacity-70">输出</summary>
+                          <OutputRenderer value={selectedIO.output} name={`${selectedNode.id}-output`} />
+                        </details>
+                      )
+                    )}
+                  </div>
+                )}
+                <ConfigPanel
+                  key={selectedNode.id}
+                  node={selectedNode}
+                  dsl={dsl}
+                  tools={tools}
+                  flows={flows}
+                  bindingOptions={bindingOptions}
+                  onRunTo={() => openRunTo(selectedNode.id)}
+                  onChange={(p) => patch((d) => ({
+                    ...d,
+                    nodes: d.nodes.map((n) => (n.id === selectedNode.id ? { ...n, ...p } : n)),
+                  }))}
+                />
+              </>
+            ) : (
+              <p className="text-sm font-mono opacity-60">点击画布节点进行配置</p>
+            )}
+          </div>
+        ) : (
+          <button type="button" title="展开配置面板" onClick={() => setRightOpen(true)}
+            className="w-7 border-l-2 border-ink bg-paper text-xs font-black shrink-0 hover:bg-lemon">◀</button>
+        )}
       </div>
 
       {insertEdge && (
@@ -502,22 +646,31 @@ export function EditorPage() {
       )}
 
       {runOpen && (
-        <NeoModal title="运行流程 · 输入" onClose={() => setRunOpen(false)}>
+        <NeoModal title={stopTarget ? `运行到 ${stopTarget} · 输入` : '运行流程 · 输入'} onClose={() => setRunOpen(false)}>
           <SchemaForm
             schema={dsl.nodes.find((n) => n.type === 'start')?.inputSchema ?? { type: 'object', properties: {} }}
             value={runInput}
             onChange={setRunInput}
             allowBindings={false}
           />
-          {breakpoints.size > 0 && (
-            <p className="text-xs font-mono mt-2">断点：{[...breakpoints].join(', ')}</p>
+          {stopTarget && (
+            <p className="text-xs font-mono mt-2">▶ 运行到 <b>{stopTarget}</b> 完成为止，下游节点跳过。</p>
           )}
           <div className="mt-4 flex justify-end gap-2">
-            <NeoButton color="bg-lemon" onClick={() => doRun('step')}>⏵ 试运行（单步）</NeoButton>
-            <NeoButton color="bg-lime" onClick={() => doRun('run')}>▶ 开始运行</NeoButton>
+            <NeoButton color="bg-lime" onClick={() => void doRun()}>▶ 开始运行</NeoButton>
           </div>
         </NeoModal>
       )}
+
+      {liveRun && store.inputRequest && !inputHidden && (
+        <InputModal
+          key={store.inputRequest.nodeId}
+          request={store.inputRequest}
+          onSubmit={(v) => store.resolveInput(store.inputRequest!.nodeId, v)}
+          onCancel={() => setInputHidden(true)}
+        />
+      )}
+      {viewCallId && <ViewDrawer callId={viewCallId} onClose={() => setViewCallId(null)} />}
     </div>
   );
 }
@@ -556,11 +709,7 @@ export function FlowsPage() {
     });
   };
 
-  const exportFlow = (f: FlowRecord) => {
-    downloadJson(f.dsl, `${f.name}.wtop-flow.json`);
-  };
-
-  const exportBundle = async (f: FlowRecord) => {
+  const exportFlow = async (f: FlowRecord) => {
     const bundle = await buildBundle(f);
     downloadJson(bundle, `${f.name}.wtop-bundle.json`);
   };
@@ -581,6 +730,7 @@ export function FlowsPage() {
       }
       if (!dslIn.nodes || !dslIn.edges) throw new Error('缺少 nodes/edges');
       const tools = await db.tools.toArray();
+      dslIn = migrateDsl(dslIn, tools);
       // 工具未登记不算导入错误（换环境导入常见），其余 error 拦截
       const problems = validateFlowDetailed(dslIn, tools)
         .filter((i) => i.level === 'error' && !i.message.includes('不存在'));
@@ -625,8 +775,7 @@ export function FlowsPage() {
             <div className="flex gap-2 flex-wrap">
               <NeoButton color="bg-sky" onClick={() => nav(`/flows/${f.id}`)}>编辑</NeoButton>
               <NeoButton color="bg-white" onClick={() => copyFlow(f)}>复制</NeoButton>
-              <NeoButton color="bg-white" onClick={() => exportFlow(f)}>导出</NeoButton>
-              <NeoButton color="bg-white" onClick={() => void exportBundle(f)}>导出运行包</NeoButton>
+              <NeoButton color="bg-white" onClick={() => void exportFlow(f)}>导出</NeoButton>
               <NeoButton color="bg-punch" onClick={() => { if (confirm(`删除流程「${f.name}」？`)) void db.flows.delete(f.id); }}>删除</NeoButton>
             </div>
           </div>
@@ -636,12 +785,7 @@ export function FlowsPage() {
       {importOpen && (
         <NeoModal title="导入流程 JSON / 运行包" onClose={() => setImportOpen(false)}>
           <Field label="DSL JSON 或 .wtop-bundle.json" hint={importErr || undefined}>
-            <textarea
-              rows={12}
-              value={importText}
-              onChange={(e) => setImportText(e.target.value)}
-              className="border-2 border-ink w-full font-mono text-xs p-2"
-            />
+            <CodeField value={importText} language="json" rows={12} onChange={setImportText} />
           </Field>
           <div className="flex justify-end">
             <NeoButton color="bg-lime" onClick={doImport}>导入</NeoButton>

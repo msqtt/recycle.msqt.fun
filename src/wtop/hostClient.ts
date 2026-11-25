@@ -36,6 +36,7 @@ export async function getHost(extraTools: ToolRecord[] = []): Promise<Host> {
     defaultTimeoutMs: settings.defaultTimeoutMs,
     humanTimeoutMs: settings.humanTimeoutMs,
     preserveFailedMs: settings.preserveFailedMs,
+    largeFileThresholdBytes: settings.maxFileMB * 1024 * 1024,
   });
   originsKey = key;
   const entries: RegistryEntry[] = tools

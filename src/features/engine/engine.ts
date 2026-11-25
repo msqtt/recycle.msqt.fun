@@ -2,7 +2,8 @@ import { WtopError, type Progress, type WaitingHumanInfo } from '@wtop/types';
 import { validateData } from '@wtop/core';
 import type { DSL, FlowNode, FlowEdge } from './dsl';
 import { evalExpression, evalMapping, evalBinding, type RunContext } from './expr';
-import { callHttp, EngineError } from './http';
+import { callHttp, callHttpDirect, EngineError } from './http';
+import { defaultJsExecutor, type JsExecutor } from './js-exec';
 import type { ToolRecord, NodeState, RunStatus } from '../../db/types';
 
 export interface CallLike {
@@ -41,6 +42,7 @@ export interface EngineDeps {
   env: Record<string, unknown>;
   fetcher?: typeof fetch;
   httpConcurrency?: number;
+  jsExecutor?: JsExecutor;
   emit(ev: EngineEvent): void;
 }
 
@@ -69,6 +71,8 @@ export interface RunOptions {
   breakpoints?: string[];
   runtimeInputs?: Record<string, unknown>;
   headless?: boolean;
+  /** v2.2 运行到此节点：目标节点完成后其余节点跳过，run 以 succeeded 结束 */
+  stopAfterNodeId?: string;
 }
 
 const errCode = (e: unknown): string =>
@@ -86,6 +90,7 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps, opts?: 
   const nodeStates: Record<string, NodeState> = {};
   let waitingCount = 0;
   let cancelled = false;
+  let stopped = false;
 
   // ---- 试运行调度门（v2 §5）----
   let mode: 'run' | 'step' = opts?.mode ?? 'run';
@@ -200,6 +205,17 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps, opts?: 
       }
       case 'transform':
         return evalExpression(node.expression ?? '', ctx);
+      case 'function': {
+        const inputs = await evalMapping(node.inputMapping ?? {}, ctx);
+        emit({ type: 'node:input', runId, nodeId: nid, params: inputs });
+        const snapshot = JSON.parse(JSON.stringify({ start: ctx.start, nodes: ctx.nodes, env: ctx.env, loop: ctx.loop }));
+        const executor = deps.jsExecutor ?? defaultJsExecutor;
+        return executor.run(node.code ?? '', inputs, snapshot, {
+          timeoutMs: node.timeoutMs ?? 30000,
+          signal: controller.signal,
+          onLog: (level, message) => log(level, message, nid),
+        });
+      }
       case 'condition': {
         const v = await evalExpression(node.expression ?? '', ctx);
         return Boolean(v);
@@ -269,6 +285,42 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps, opts?: 
             timedOut: () => timedOut,
             fetcher: deps.fetcher,
             getSecret: (name) => deps.getSecret(tool.id, name),
+          });
+        } finally {
+          clearTimeout(timer);
+          controller.signal.removeEventListener('abort', onAbort);
+          releaseHttp();
+        }
+      }
+      case 'http': {
+        const url = await evalBinding(node.url ?? '', ctx);
+        if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+          throw new EngineError('INVALID_INPUT', `http 节点 url 无效: ${node.url}`);
+        }
+        const query = await evalMapping(node.query ?? {}, ctx);
+        // {{secret:名称}} 不是 JSONata 绑定：先掩码，求值后还原，交给 callHttpDirect 解析
+        const mask = (s: string) => s.replace(/\{\{secret:([\w-]+)\}\}/g, '\u0000$1\u0000');
+        const unmask = (s: string) => s.replace(/\u0000([\w-]+)\u0000/g, '{{secret:$1}}');
+        const headersRaw = await evalMapping(
+          Object.fromEntries(Object.entries(node.headers ?? {}).map(([k, v]) => [k, typeof v === 'string' ? mask(v) : v])),
+          ctx,
+        );
+        const headers = Object.fromEntries(Object.entries(headersRaw).map(([k, v]) => [k, typeof v === 'string' ? unmask(v) : v]));
+        const body = await evalBinding(node.body, ctx);
+        const method = (node.method ?? 'GET') as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+        emit({ type: 'node:input', runId, nodeId: nid, params: { method, url, query, headers, body } });
+        await acquireHttp();
+        const ac = new AbortController();
+        const onAbort = () => ac.abort();
+        controller.signal.addEventListener('abort', onAbort);
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; ac.abort(); }, node.timeoutMs ?? 60000);
+        try {
+          return await callHttpDirect({ method, url, query, headers, body }, {
+            signal: ac.signal,
+            timedOut: () => timedOut,
+            fetcher: deps.fetcher,
+            getSecret: (name) => deps.getSecret('', name),
           });
         } finally {
           clearTimeout(timer);
@@ -406,13 +458,14 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps, opts?: 
       states[nid] = { ...states[nid], status: 'succeeded', endedAt: Date.now(), percent: 100 };
       emit({ type: 'node:state', runId, nodeId: nid, state: states[nid] });
       emit({ type: 'node:output', runId, nodeId: nid, output });
+      if (!prefix && opts?.stopAfterNodeId === node.id) stopped = true;
       for (const e of outgoing.get(node.id) ?? []) {
         resolveEdge(e, branchSel ? branchSel(e) : true);
       }
     };
 
     while ((ready.length || active.size) && !failure) {
-      while (ready.length && !cancelled) {
+      while (ready.length && !cancelled && !stopped) {
         const node = ready.shift()!;
         const nid = prefix + node.id;
         const p = gate(node, prefix)
@@ -423,6 +476,7 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps, opts?: 
           );
         active.set(nid, p);
       }
+      if (stopped) while (ready.length) skipNode(ready.shift()!);
       if (!active.size) break;
       const settled = await Promise.race(active.values());
       active.delete(prefix + settled.id);
@@ -465,6 +519,16 @@ export function runFlow(dsl: DSL, startInput: unknown, deps: EngineDeps, opts?: 
       controller.abort();
       for (const call of activeWtop.values()) call.cancel('engine');
       await Promise.allSettled(active.values());
+    }
+    if (stopped && !prefix) {
+      for (const n of nodes) {
+        const sid = prefix + n.id;
+        if (states[sid]?.status === 'pending') {
+          states[sid] = { ...states[sid], status: 'skipped', endedAt: Date.now() };
+          emit({ type: 'node:state', runId, nodeId: sid, state: states[sid] });
+        }
+      }
+      log('info', `已运行到节点 ${opts?.stopAfterNodeId}，其余节点跳过`);
     }
     const endNode = nodes.find((n) => n.type === 'end');
     return {

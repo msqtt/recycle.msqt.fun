@@ -1,9 +1,11 @@
+import { useEffect } from 'react';
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { ToolsPage } from './features/tools/ToolsPage';
 import { FlowsPage, EditorPage } from './features/editor/EditorPage';
 import { RunPage, HistoryPage } from './features/run/RunPage';
 import { SettingsPage } from './features/settings/SettingsPage';
 import { useRunStore } from './shared/run-store';
+import { seedOfficialTools } from './wtop/official';
 
 const NAV = [
   { to: '/flows', label: '流程' },
@@ -13,10 +15,10 @@ const NAV = [
 ];
 
 function RunningBanner() {
-  const { runId, status, flowName } = useRunStore();
+  const { runId, flowId, status, flowName } = useRunStore();
   const loc = useLocation();
   if (!runId || (status !== 'running' && status !== 'paused-human')) return null;
-  if (loc.pathname === `/run/${runId}`) return null;
+  if (loc.pathname === `/run/${runId}` || loc.pathname === `/flows/${flowId}`) return null;
   return (
     <NavLink
       to={`/run/${runId}`}
@@ -28,6 +30,7 @@ function RunningBanner() {
 }
 
 export function App() {
+  useEffect(() => { void seedOfficialTools(); }, []);
   return (
     <BrowserRouter>
       <header className="h-16 border-b-2 border-ink bg-lemon flex items-center px-4 gap-6 sticky top-0 z-[800]">
