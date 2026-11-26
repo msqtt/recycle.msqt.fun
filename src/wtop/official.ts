@@ -9,21 +9,22 @@ const OFFICIAL_SITES = [
   { id: 'official-data', name: '数据仓库', prod: 'https://data.msqt.fun', devPort: 5184, allowSameOrigin: true },
 ];
 
-/** 首次启动预置官方工具（只种一次，用户删除后不复活）；manifest 后台懒拉取 */
+/** 首次启动预置官方工具（只种一次，用户删除后不复活）；缺 manifest 的每次启动补拉 */
 export async function seedOfficialTools(): Promise<void> {
-  if (await db.settings.get('officialSeeded')) return;
-  await db.settings.put({ key: 'officialSeeded', value: true });
-  const now = Date.now();
-  for (const s of OFFICIAL_SITES) {
-    if (await db.tools.get(s.id)) continue;
-    const url = import.meta.env.DEV ? `http://localhost:${s.devPort}` : s.prod;
-    const rec: ToolRecord = {
-      id: s.id, type: 'wtop', url,
-      displayName: `${s.name}（官方）`,
-      health: 'unknown', origins: [new URL(url).origin],
-      allowSameOrigin: s.allowSameOrigin, addedAt: now, updatedAt: now,
-    };
-    await db.tools.put(rec);
+  if (!(await db.settings.get('officialSeeded'))) {
+    await db.settings.put({ key: 'officialSeeded', value: true });
+    const now = Date.now();
+    for (const s of OFFICIAL_SITES) {
+      if (await db.tools.get(s.id)) continue;
+      const url = import.meta.env.DEV ? `http://localhost:${s.devPort}` : s.prod;
+      const rec: ToolRecord = {
+        id: s.id, type: 'wtop', url,
+        displayName: `${s.name}（官方）`,
+        health: 'unknown', origins: [new URL(url).origin],
+        allowSameOrigin: s.allowSameOrigin, addedAt: now, updatedAt: now,
+      };
+      await db.tools.put(rec);
+    }
   }
   void refreshOfficialManifests();
 }
