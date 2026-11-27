@@ -17,6 +17,8 @@ function layerRoot(): HTMLElement {
 }
 
 export async function getHost(extraTools: ToolRecord[] = []): Promise<Host> {
+  // 快调用可能在 IDB 读取完成前就 finalize，show 必须同步拿到 host 才能赶上保活窗口
+  if (host && extraTools.length === 0 && activeCallIds.size > 0) return host;
   const registered = await db.tools.where('type').equals('wtop').toArray();
   // bundle 临时工具：不写库，仅并入白名单与注册表
   const tools = [

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LogEntry } from '../db/types';
 import type { JSONSchema } from '@wtop/types';
+import type { FlowNode } from '../features/engine/dsl';
 import { getHost } from '../wtop/hostClient';
-import { NeoButton, NeoModal } from './ui';
+import { useRunStore } from './run-store';
+import { NeoButton, NeoModal, NeoBadge } from './ui';
 import { SchemaForm, schemaDefaults } from './schema-form';
 
 export function LogPanel({ logs, className = 'h-56' }: { logs: LogEntry[]; className?: string }) {
@@ -45,6 +47,53 @@ export function ViewDrawer({ callId, onClose }: { callId: string; onClose: () =>
         <NeoButton color="bg-white" className="!px-2 !py-0.5" onClick={onClose}>收起</NeoButton>
       </div>
       <div ref={ref} className="flex-1 m-2 border-2 border-dashed border-ink/40" />
+    </div>
+  );
+}
+
+/** 流水线自动跟随面板：运行中优先展示正在执行的 WTOP 节点，空闲时停留最近完成节点 */
+export function PipelinePreview({ nodes, onClose }: { nodes: FlowNode[]; onClose: () => void }) {
+  const store = useRunStore();
+  const ref = useRef<HTMLDivElement>(null);
+  const entries = Object.entries(store.nodeStates).filter(([, st]) => st.callId);
+  const active = entries
+    .filter(([, st]) => st.status === 'running' || st.status === 'waiting-human')
+    .sort((a, b) => (b[1].startedAt ?? 0) - (a[1].startedAt ?? 0))[0];
+  const last = entries
+    .filter(([, st]) => st.status === 'succeeded' || st.status === 'failed')
+    .sort((a, b) => (b[1].endedAt ?? 0) - (a[1].endedAt ?? 0))[0];
+  const [targetId, st] = active ?? last ?? [];
+  const callId = st?.callId;
+
+  useEffect(() => {
+    if (!callId) return;
+    let host: Awaited<ReturnType<typeof getHost>> | null = null;
+    const place = async () => {
+      host = await getHost();
+      const r = ref.current?.getBoundingClientRect();
+      if (r) host.show(callId, { left: r.x, top: r.y, width: r.width, height: r.height });
+    };
+    void place();
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('resize', place);
+      void host?.hide(callId);
+    };
+  }, [callId]);
+
+  const node = nodes.find((n) => n.id === targetId);
+  return (
+    <div data-pipeline-preview className="fixed right-0 top-16 bottom-0 w-[480px] z-[900] border-l-2 border-ink bg-paper flex flex-col">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b-2 border-ink bg-sky">
+        <span data-preview-header className="font-bold text-sm uppercase truncate">
+          流水线现场{targetId ? ` · ${targetId}${node?.method ? `.${node.method}` : ''}` : ''}
+        </span>
+        {st && <NeoBadge tone={st.status}>{st.status === 'running' && st.percent !== undefined ? `${Math.round(st.percent)}%` : st.status}</NeoBadge>}
+        <NeoButton color="bg-white" className="!px-2 !py-0.5" onClick={onClose}>收起</NeoButton>
+      </div>
+      <div ref={ref} className="flex-1 m-2 border-2 border-dashed border-ink/40 relative">
+        {!callId && <p className="absolute inset-0 grid place-items-center text-xs font-mono opacity-60">等待 WTOP 节点执行…</p>}
+      </div>
     </div>
   );
 }

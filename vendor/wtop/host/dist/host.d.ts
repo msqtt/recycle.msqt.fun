@@ -18,6 +18,8 @@ export interface HostOptions {
     allowedOrigins: string[];
     maxConcurrent?: number;
     preserveFailedMs?: number;
+    /** 成功调用被用户展示（show）后的保活上限；hide 即回收，到期兜底回收 */
+    keepShownMs?: number;
     handshakeTimeoutMs?: number;
     defaultTimeoutMs?: number;
     humanTimeoutMs?: number;

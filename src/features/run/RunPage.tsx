@@ -7,7 +7,7 @@ import type { FlowNode } from '../engine/dsl';
 import { useRunStore, type NodeIO } from '../../shared/run-store';
 import { NeoButton, NeoBadge, PageTitle } from '../../shared/ui';
 import { OutputRenderer } from '../../shared/output-view';
-import { LogPanel, ViewDrawer, InputModal } from '../../shared/run-widgets';
+import { LogPanel, ViewDrawer, InputModal, PipelinePreview } from '../../shared/run-widgets';
 
 const STATUS_LABEL: Record<string, string> = {
   running: '运行中', 'paused-human': '等待人工', 'paused-step': '单步暂停', succeeded: '成功', failed: '失败', cancelled: '已取消',
@@ -106,6 +106,8 @@ export function RunPage() {
     [live, store.flowId, record?.flowId],
   );
   const [viewCallId, setViewCallId] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  useEffect(() => { if (live) setPreviewOpen(true); }, [live]);
   const [inputHidden, setInputHidden] = useState(false);
   useEffect(() => { setInputHidden(false); }, [store.inputRequest?.nodeId]);
 
@@ -122,12 +124,12 @@ export function RunPage() {
     ? flowNodes.map((n) => n.id).filter((id) => id in nodeStates || live)
     : Object.keys(nodeStates);
   const flowName = live ? store.flowName : flow?.name ?? '运行';
-  const stepActive = live && (status === 'running' || status === 'paused-step') && (store.mode === 'step' || status === 'paused-step');
+  const stepActive = live && (status === 'running' || status === 'paused-step');
 
   if (!live && !record) return <p className="font-mono p-6">加载中…</p>;
 
   return (
-    <div className="p-6 max-w-4xl mx-auto" style={{ marginRight: viewCallId ? 500 : undefined }}>
+    <div className="p-6 max-w-4xl mx-auto" style={{ marginRight: viewCallId || (live && previewOpen) ? 500 : undefined }}>
       <div className="flex items-center gap-3 mb-6 flex-wrap">
         <PageTitle sub={runId}>{flowName}</PageTitle>
         <div className="flex-1" />
@@ -136,12 +138,13 @@ export function RunPage() {
         {live && (status === 'running' || status === 'paused-human' || status === 'paused-step') && (
           <NeoButton color="bg-punch" onClick={() => store.cancel()}>■ 取消运行</NeoButton>
         )}
+        {live && <NeoButton color="bg-white" onClick={() => setPreviewOpen(!previewOpen)}>{previewOpen ? '隐藏现场' : '现场'}</NeoButton>}
         <Link to="/history" className="font-bold text-sm underline">历史 →</Link>
       </div>
 
       {stepActive && (
         <div className="border-2 border-ink bg-lemon shadow-neo p-2 mb-4 flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-black uppercase">试运行控制</span>
+          <span className="text-xs font-black uppercase">{store.mode === 'step' || status === 'paused-step' ? '试运行控制' : '运行控制'}</span>
           {store.pausedNodeId
             ? <span className="font-mono text-xs">暂停于 <b>{store.pausedNodeId}</b>（展开上游输出审查后放行）</span>
             : <span className="font-mono text-xs">运行中…</span>}
@@ -183,6 +186,7 @@ export function RunPage() {
       <LogPanel logs={logs} />
 
       {viewCallId && <ViewDrawer callId={viewCallId} onClose={() => setViewCallId(null)} />}
+      {live && previewOpen && !viewCallId && <PipelinePreview nodes={flowNodes} onClose={() => setPreviewOpen(false)} />}
 
       {live && store.inputRequest && !inputHidden && (
         <InputModal

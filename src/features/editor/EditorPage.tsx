@@ -18,7 +18,7 @@ import { SchemaForm, schemaDefaults } from '../../shared/schema-form';
 import { ConfigPanel, useBindingOptions } from './ConfigPanel';
 import { useRunStore } from '../../shared/run-store';
 import { OutputRenderer } from '../../shared/output-view';
-import { LogPanel, InputModal, ViewDrawer } from '../../shared/run-widgets';
+import { LogPanel, InputModal, ViewDrawer, PipelinePreview } from '../../shared/run-widgets';
 import { CodeField } from '../../shared/code-field';
 import { buildBundle, isBundle, downloadJson, type FlowBundle } from '../bundle';
 
@@ -220,6 +220,9 @@ export function EditorPage() {
   const [rightOpen, setRightOpen] = usePanelOpen('right');
   const [logsOpen, setLogsOpen] = useState(false);
   const [viewCallId, setViewCallId] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const hasWtop = (dsl?.nodes ?? []).some((n) => n.type === 'call-wtop');
+  useEffect(() => { if (liveRun && hasWtop) setPreviewOpen(true); }, [liveRun, hasWtop]);
   const [inputHidden, setInputHidden] = useState(false);
   useEffect(() => { setInputHidden(false); }, [store.inputRequest?.nodeId]);
 
@@ -444,7 +447,7 @@ export function EditorPage() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-64px)]">
-      <div className="flex items-center gap-3 px-4 py-2 border-b-2 border-ink bg-paper flex-wrap">
+      <div className="flex items-center gap-3 px-4 py-2 border-b-2 border-ink bg-paper flex-wrap" style={{ marginRight: liveRun && previewOpen && !viewCallId ? 500 : undefined }}>
         <NeoInput value={name} onChange={(e) => { setName(e.target.value); setDirty(true); }} className="!w-56 font-bold" />
         <NeoBadge tone="ok">v{record.version}{dirty ? ' *' : ''}</NeoBadge>
         {liveRun && store.status && (
@@ -458,6 +461,7 @@ export function EditorPage() {
         {liveRun && (
           <>
             <NeoButton color="bg-white" onClick={() => setLogsOpen(!logsOpen)}>{logsOpen ? '隐藏日志' : '日志'}</NeoButton>
+            {hasWtop && <NeoButton color="bg-white" onClick={() => setPreviewOpen(!previewOpen)}>{previewOpen ? '隐藏现场' : '现场'}</NeoButton>}
             <Link to={`/run/${store.runId}`} className="font-bold text-xs underline">详情</Link>
           </>
         )}
@@ -467,7 +471,7 @@ export function EditorPage() {
         <NeoButton color="bg-lime" onClick={openRun} disabled={runActive}>▶ 运行</NeoButton>
       </div>
 
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0" style={{ marginRight: liveRun && previewOpen && !viewCallId ? 500 : undefined }}>
         {leftOpen ? (
           <div className="w-40 border-r-2 border-ink bg-paper p-2 overflow-auto shrink-0">
             <button type="button" title="收起节点面板" onClick={() => setLeftOpen(false)}
@@ -671,6 +675,7 @@ export function EditorPage() {
         />
       )}
       {viewCallId && <ViewDrawer callId={viewCallId} onClose={() => setViewCallId(null)} />}
+      {liveRun && previewOpen && !viewCallId && <PipelinePreview nodes={dsl.nodes} onClose={() => setPreviewOpen(false)} />}
     </div>
   );
 }

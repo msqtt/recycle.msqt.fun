@@ -3,7 +3,7 @@ import { DEFAULTS, PROTOCOL_VERSION, WtopError, } from '@wtop/types';
 import { IframeLayer } from './layer.js';
 import { createRegistryClient, normalizeUrl, } from './registry.js';
 export function createHost(options) {
-    const { allowedOrigins, maxConcurrent = DEFAULTS.maxConcurrent, preserveFailedMs = DEFAULTS.preserveFailedMs, handshakeTimeoutMs = DEFAULTS.handshakeTimeoutMs, defaultTimeoutMs = DEFAULTS.defaultTimeoutMs, humanTimeoutMs = DEFAULTS.humanTimeoutMs, largeFileThresholdBytes = DEFAULTS.largeFileThresholdBytes, cancelGraceMs = DEFAULTS.cancelGraceMs, heartbeatIntervalMs = DEFAULTS.heartbeatIntervalMs, progressSilenceMs = DEFAULTS.progressSilenceMs, logger = console, } = options;
+    const { allowedOrigins, maxConcurrent = DEFAULTS.maxConcurrent, preserveFailedMs = DEFAULTS.preserveFailedMs, keepShownMs = DEFAULTS.keepShownMs, handshakeTimeoutMs = DEFAULTS.handshakeTimeoutMs, defaultTimeoutMs = DEFAULTS.defaultTimeoutMs, humanTimeoutMs = DEFAULTS.humanTimeoutMs, largeFileThresholdBytes = DEFAULTS.largeFileThresholdBytes, cancelGraceMs = DEFAULTS.cancelGraceMs, heartbeatIntervalMs = DEFAULTS.heartbeatIntervalMs, progressSilenceMs = DEFAULTS.progressSilenceMs, logger = console, } = options;
     const registry = options.registry ?? createRegistryClient(options.registryOptions);
     const layer = options.layerRoot ? new IframeLayer(options.layerRoot) : null;
     const factory = options.instanceFactory ?? ((opts) => {
@@ -122,7 +122,11 @@ export function createHost(options) {
         setState(rec, 'succeeded');
         rec.resolve(data);
         const reusable = (rec.modeOverride ?? rec.methodDef?.mode) === 'headless' && rec.methodDef?.stateless === true;
-        if (reusable && rec.instance && rec.sessionId) {
+        if (rec.userShown && rec.instance) {
+            // 流水线 preview：展示中的成功场景保活，hide 或 keepShownMs 到期再回收
+            rec.preserveTimer = setTimeout(() => reclaim(rec), keepShownMs);
+        }
+        else if (reusable && rec.instance && rec.sessionId) {
             poolInstance(rec);
         }
         else {
@@ -167,6 +171,26 @@ export function createHost(options) {
         p.unsub();
         p.instance.destroy();
         pool.delete(key);
+    };
+    const reclaim = (rec) => {
+        if (rec.preserveTimer) {
+            clearTimeout(rec.preserveTimer);
+            rec.preserveTimer = null;
+        }
+        if (!rec.instance) {
+            recs.delete(rec.id);
+            return;
+        }
+        const reusable = (rec.modeOverride ?? rec.methodDef?.mode) === 'headless' && rec.methodDef?.stateless === true;
+        if (reusable && rec.sessionId) {
+            poolInstance(rec);
+        }
+        else {
+            destroyInstance(rec);
+            recs.delete(rec.id);
+            emit('call:state', { callId: rec.id, state: 'destroyed' });
+        }
+        pump();
     };
     const startExecTimer = (rec) => {
         rec.execStartedAt = Date.now();
@@ -497,6 +521,8 @@ export function createHost(options) {
             if (rec.sessionId) {
                 send(rec, { wtop: rec.negotiated, type: 'ui.visibility', sessionId: rec.sessionId, callId: rec.id, payload: { visible: false } });
             }
+            if (rec.finalized)
+                reclaim(rec);
         },
         cancel(id, reason = 'user') {
             const rec = recs.get(id);
