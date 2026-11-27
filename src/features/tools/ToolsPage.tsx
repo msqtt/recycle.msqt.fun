@@ -165,7 +165,7 @@ export function ToolsPage() {
         ))}
         {tools.length === 0 && (
           <NeoCard color="bg-lemon" className="md:col-span-2 xl:col-span-3">
-            <p className="font-bold">还没有工具。官方工具站会自动预置；也可注册自己的 WTOP 工具站。</p>
+            <p className="font-bold">还没有工具。预置工具站会自动添加；也可注册自己的 WTOP 工具站。</p>
           </NeoCard>
         )}
       </div>
