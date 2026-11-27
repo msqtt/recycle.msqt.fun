@@ -21,6 +21,7 @@ import { OutputRenderer } from '../../shared/output-view';
 import { LogPanel, InputModal, ViewDrawer, PipelinePreview } from '../../shared/run-widgets';
 import { CodeField } from '../../shared/code-field';
 import { buildBundle, isBundle, downloadJson, type FlowBundle } from '../bundle';
+import { SAMPLE_DESCRIPTIONS } from '../../wtop/samples';
 
 const NODE_COLORS: Record<NodeType, string> = {
   start: '#B8F53D', end: '#B8F53D', 'call-wtop': '#7DD3FC', 'call-http': '#C4B5FD', http: '#C4B5FD',
@@ -772,8 +773,12 @@ export function FlowsPage() {
           <div key={f.id} className="border-2 border-ink bg-white shadow-neo p-4">
             <div className="flex items-center justify-between mb-1">
               <h3 className="font-black text-lg">{f.name}</h3>
-              <NeoBadge tone="ok">v{f.version}</NeoBadge>
+              <div className="flex gap-1">
+                {f.id.startsWith('sample-') && <NeoBadge tone="ok">示例</NeoBadge>}
+                <NeoBadge tone="ok">v{f.version}</NeoBadge>
+              </div>
             </div>
+            {SAMPLE_DESCRIPTIONS[f.id] && <p className="text-xs font-bold mb-1 opacity-80">{SAMPLE_DESCRIPTIONS[f.id]}</p>}
             <p className="font-mono text-xs opacity-60 mb-3">
               {f.dsl.nodes.length} 节点 · {f.dsl.edges.length} 边 · {new Date(f.updatedAt).toLocaleString()}
             </p>

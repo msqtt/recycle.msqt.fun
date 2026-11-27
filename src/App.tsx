@@ -6,6 +6,7 @@ import { RunPage, HistoryPage } from './features/run/RunPage';
 import { SettingsPage } from './features/settings/SettingsPage';
 import { useRunStore } from './shared/run-store';
 import { seedOfficialTools } from './wtop/official';
+import { seedSampleFlows } from './wtop/samples';
 
 const NAV = [
   { to: '/flows', label: '流程' },
@@ -30,7 +31,7 @@ function RunningBanner() {
 }
 
 export function App() {
-  useEffect(() => { void seedOfficialTools(); }, []);
+  useEffect(() => { void seedOfficialTools(); void seedSampleFlows(); }, []);
   return (
     <BrowserRouter>
       <header className="h-16 border-b-2 border-ink bg-lemon flex items-center px-4 gap-6 sticky top-0 z-[800]">
